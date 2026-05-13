@@ -108,6 +108,6 @@ mod tests {
     fn check_total_under_u32_max() {
         assert!(check_total_cells_fit_u32(1000).is_ok());
         assert!(check_total_cells_fit_u32(u32::MAX as usize).is_ok());
-        assert!(check_total_cells_fit_u32(u32::MAX as usize + 1).is_ok() == false);
+        assert!(check_total_cells_fit_u32(u32::MAX as usize + 1).is_err());
     }
 }

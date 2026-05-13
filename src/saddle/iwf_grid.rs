@@ -115,16 +115,16 @@ mod tests {
         // All other cells are 10 (impassable for the cheap path).
         let mut e = vec![10.0; 25];
         // Basin 1 around (0,0)
-        e[0 * 5 + 0] = 0.0;
-        e[0 * 5 + 1] = 1.0;
-        e[1 * 5 + 0] = 1.0;
-        e[1 * 5 + 1] = 2.0;
+        e[0] = 0.0;
+        e[1] = 1.0;
+        e[5] = 1.0;
+        e[6] = 2.0;
         // Bridge row: (2,0)–(2,4), saddle at (2,2)=4, shoulders at 3
-        e[2 * 5 + 0] = 3.0;
-        e[2 * 5 + 1] = 3.0;
-        e[2 * 5 + 2] = 4.0; // saddle
-        e[2 * 5 + 3] = 3.0;
-        e[2 * 5 + 4] = 3.0;
+        e[10] = 3.0;
+        e[11] = 3.0;
+        e[12] = 4.0; // saddle
+        e[13] = 3.0;
+        e[14] = 3.0;
         // Basin 2 around (4,4)
         e[4 * 5 + 4] = 0.0;
         e[3 * 5 + 4] = 1.0;
@@ -141,9 +141,7 @@ mod tests {
         // 3x5 grid. Middle column is NaN: an impassable wall.
         let nan = f64::NAN;
         let e = vec![
-            0.0, 1.0, nan, 1.0, 0.0,
-            1.0, 2.0, nan, 2.0, 1.0,
-            0.0, 1.0, nan, 1.0, 0.0,
+            0.0, 1.0, nan, 1.0, 0.0, 1.0, 2.0, nan, 2.0, 1.0, 0.0, 1.0, nan, 1.0, 0.0,
         ];
         let arr = to_dyn([3, 5], e);
         let result = iwf_grid_inner(arr.view(), &[1, 0], &[1, 4]);
@@ -152,10 +150,7 @@ mod tests {
 
     #[test]
     fn adjacent_basins_saddle_is_max_of_endpoints() {
-        let e = vec![
-            0.0, 5.0, 0.0,
-            10.0, 10.0, 10.0,
-        ];
+        let e = vec![0.0, 5.0, 0.0, 10.0, 10.0, 10.0];
         let arr = to_dyn([2, 3], e);
         // start=(0,0), end=(0,2). Bridge is (0,1)=5.0 on the cheap row.
         let (idx, energy) = iwf_grid_inner(arr.view(), &[0, 0], &[0, 2]).unwrap();

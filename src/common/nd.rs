@@ -36,12 +36,7 @@ pub fn linear_to_index(mut linear: usize, shape: &[usize], strides: &[usize]) ->
 /// their linear indices into `out`. The buffer `out` is cleared first.
 ///
 /// Boundary cells produce fewer than 2N neighbors.
-pub fn axis_neighbors(
-    linear: usize,
-    shape: &[usize],
-    strides: &[usize],
-    out: &mut Vec<usize>,
-) {
+pub fn axis_neighbors(linear: usize, shape: &[usize], strides: &[usize], out: &mut Vec<usize>) {
     out.clear();
     let ndim = shape.len();
     let mut remaining = linear;
@@ -66,7 +61,10 @@ mod tests {
     fn strides_are_c_contiguous() {
         assert_eq!(compute_strides(&[2, 3, 4]), vec![12, 4, 1]);
         assert_eq!(compute_strides(&[5]), vec![1]);
-        assert_eq!(compute_strides(&[2, 2, 2, 2, 2, 2, 2]), vec![64, 32, 16, 8, 4, 2, 1]);
+        assert_eq!(
+            compute_strides(&[2, 2, 2, 2, 2, 2, 2]),
+            vec![64, 32, 16, 8, 4, 2, 1]
+        );
     }
 
     #[test]
@@ -99,7 +97,7 @@ mod tests {
         let mut buf = Vec::new();
         // Interior cell (2, 2) → linear 12
         axis_neighbors(12, &shape, &strides, &mut buf);
-        let mut got: Vec<usize> = buf.iter().copied().collect();
+        let mut got: Vec<usize> = buf.to_vec();
         got.sort();
         // Neighbors: (1,2)=7, (3,2)=17, (2,1)=11, (2,3)=13
         let mut expected = vec![7, 11, 13, 17];
