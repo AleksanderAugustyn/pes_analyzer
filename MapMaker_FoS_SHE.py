@@ -635,13 +635,14 @@ def build_5d_energy_grid(df: pl.DataFrame) -> Grid5D:
     print(f"      Build time: {build_time:.1f} seconds")
 
     if __debug__:
-        # Count of non-NaN cells in `energies` must equal len(energy_map). Catches
-        # gross indexing/shape mistakes at build time. Not a value-level check —
-        # duplicate keys in `df` would leave both structures self-consistent but wrong.
+        # Both structures use last-write-wins for duplicate keys. The dense array
+        # has n_non_nan valid cells; energy_map includes NaN-valued entries for
+        # rows where total_energy is NaN. Compare unique cell counts correctly.
         n_non_nan = int(np.count_nonzero(~np.isnan(energies)))
-        assert n_non_nan == len(energy_map), (
+        n_nan_in_map = sum(1 for v in energy_map.values() if np.isnan(v))
+        assert n_non_nan == len(energy_map) - n_nan_in_map, (
             f"dense/sparse size mismatch: {n_non_nan} non-NaN cells vs "
-            f"{len(energy_map)} dict entries"
+            f"{len(energy_map) - n_nan_in_map} non-NaN dict entries"
         )
 
     return Grid5D(
