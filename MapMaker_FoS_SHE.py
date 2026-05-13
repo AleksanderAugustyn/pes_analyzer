@@ -41,6 +41,8 @@ import polars as pl
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
 
+from pes_analyzer.saddle import find_iwf_grid
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -1289,22 +1291,23 @@ def find_fission_exit_5d(grid: Grid5D, sm: CriticalPoint) -> CriticalPoint:
 
 def find_saddle_point_5d(grid: Grid5D, start: CriticalPoint, end: CriticalPoint,
                          saddle_type: CriticalPointType, name: str) -> CriticalPoint:
-    """Find saddle point between two minima in 5D using flooding algorithm (Union-Find).
+    """Find saddle point between two minima in 5D via the Rust-backed
+    imaginary-water-flow watershed.
 
-    The algorithm:
-    1. Sort all grid points by energy
-    2. Process points in ascending energy order, connecting them to 10-connected neighbors
-    3. The point at which start and end basins connect is the saddle
+    Delegates to ``pes_analyzer.saddle.find_iwf_grid`` operating on
+    ``grid.energies`` (dense float64 ndarray). See ``docs/SPEC.md`` for the
+    algorithm and ``docs/superpowers/specs/2026-05-13-iwf-substitution-design.md``
+    for the substitution rationale.
 
     Args:
-        grid: Grid5D object
-        start: Starting minimum (e.g., ground state)
-        end: Ending minimum (e.g., secondary minimum)
-        saddle_type: Type of saddle point
-        name: Name for logging
+        grid: Grid5D object (must have ``energies`` populated).
+        start: Starting minimum (e.g., ground state).
+        end: Ending minimum (e.g., secondary minimum).
+        saddle_type: Type of saddle point.
+        name: Name for logging.
 
     Returns:
-        CriticalPoint for the saddle
+        CriticalPoint for the saddle.
     """
     saddle = CriticalPoint(saddle_type, name)
 
@@ -1312,65 +1315,39 @@ def find_saddle_point_5d(grid: Grid5D, start: CriticalPoint, end: CriticalPoint,
         print(f"    ✗ {name}: Cannot find (invalid start/end points)")
         return saddle
 
-    print(f"    Searching for {name} between c={start.point.c:.4f} and c={end.point.c:.4f} (5D)")
+    print(f"    Searching for {name} between c={start.point.c:.4f} and "
+          f"c={end.point.c:.4f} (5D)")
 
-    # Find closest grid points to start and end
-    start_ic = np.argmin(np.abs(grid.unique_c - start.point.c))
-    start_ia3 = np.argmin(np.abs(grid.unique_a3 - start.point.a3))
-    start_ia4 = np.argmin(np.abs(grid.unique_a4 - start.point.a4))
-    start_ia5 = np.argmin(np.abs(grid.unique_a5 - start.point.a5))
-    start_ia6 = np.argmin(np.abs(grid.unique_a6 - start.point.a6))
-    start_key = (start_ic, start_ia3, start_ia4, start_ia5, start_ia6)
+    start_key = (
+        int(np.argmin(np.abs(grid.unique_c  - start.point.c))),
+        int(np.argmin(np.abs(grid.unique_a3 - start.point.a3))),
+        int(np.argmin(np.abs(grid.unique_a4 - start.point.a4))),
+        int(np.argmin(np.abs(grid.unique_a5 - start.point.a5))),
+        int(np.argmin(np.abs(grid.unique_a6 - start.point.a6))),
+    )
+    end_key = (
+        int(np.argmin(np.abs(grid.unique_c  - end.point.c))),
+        int(np.argmin(np.abs(grid.unique_a3 - end.point.a3))),
+        int(np.argmin(np.abs(grid.unique_a4 - end.point.a4))),
+        int(np.argmin(np.abs(grid.unique_a5 - end.point.a5))),
+        int(np.argmin(np.abs(grid.unique_a6 - end.point.a6))),
+    )
 
-    end_ic = np.argmin(np.abs(grid.unique_c - end.point.c))
-    end_ia3 = np.argmin(np.abs(grid.unique_a3 - end.point.a3))
-    end_ia4 = np.argmin(np.abs(grid.unique_a4 - end.point.a4))
-    end_ia5 = np.argmin(np.abs(grid.unique_a5 - end.point.a5))
-    end_ia6 = np.argmin(np.abs(grid.unique_a6 - end.point.a6))
-    end_key = (end_ic, end_ia3, end_ia4, end_ia5, end_ia6)
-
-    # Sort all valid points by energy
-    # Filter out nan energies before sorting
-    valid_items = [(k, e) for k, e in grid.energy_map.items() if not np.isnan(e)]
-    points = sorted(valid_items, key=lambda x: x[1])
-
-    # Initialize Union-Find with sparse key mapping
-    # Map each valid key to a unique integer ID
-    key_to_id = {key: idx for idx, (key, _) in enumerate(points)}
-    n_points = len(points)
-
-    dsu = DisjointSetUnion(n_points)
-    processed = set()
-
-    start_id = key_to_id.get(start_key)
-    end_id = key_to_id.get(end_key)
-
-    if start_id is None or end_id is None:
-        print(f"    ✗ {name}: Start or end point not in grid")
+    if np.isnan(grid.energies[start_key]) or np.isnan(grid.energies[end_key]):
+        print(f"    ✗ {name}: Start or end snapped to a NaN cell")
         return saddle
 
-    # Flood fill in energy order
-    for key, energy in points:
-        current_id = key_to_id[key]
-        processed.add(key)
+    result = find_iwf_grid(grid.energies, start_key, end_key)
+    if result is None:
+        print(f"    ✗ {name}: Not found (basins did not connect)")
+        return saddle
 
-        # Connect to already-processed 10-connected neighbors
-        neighbors = grid.get_neighbors_5d(*key)
-        for neighbor_key in neighbors:
-            if neighbor_key in processed:
-                neighbor_id = key_to_id[neighbor_key]
-                dsu.union(current_id, neighbor_id)
-
-        # Check if start and end are now connected
-        if dsu.find(start_id) == dsu.find(end_id):
-            saddle.point = _key_to_gridpoint(grid, key)
-            saddle.found = True
-            print(f"    ✓ {name}: c={saddle.point.c:.4f}, a3={saddle.point.a3:.4f}, "
-                  f"a4={saddle.point.a4:.4f}, a5={saddle.point.a5:.4f}, a6={saddle.point.a6:.4f}, "
-                  f"E={energy:.4f} MeV")
-            return saddle
-
-    print(f"    ✗ {name}: Not found (basins did not connect)")
+    saddle_idx, saddle_energy = result
+    saddle.point = _key_to_gridpoint(grid, saddle_idx)
+    saddle.found = True
+    print(f"    ✓ {name}: c={saddle.point.c:.4f}, a3={saddle.point.a3:.4f}, "
+          f"a4={saddle.point.a4:.4f}, a5={saddle.point.a5:.4f}, "
+          f"a6={saddle.point.a6:.4f}, E={saddle_energy:.4f} MeV")
     return saddle
 
 
