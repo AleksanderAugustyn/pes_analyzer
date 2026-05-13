@@ -8,7 +8,7 @@ mod common;
 mod saddle;
 
 #[pymodule]
-fn pes_analyzer(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     saddle::register(m)?;
     Ok(())
 }
