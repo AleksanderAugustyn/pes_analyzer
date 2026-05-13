@@ -8,7 +8,6 @@ verbatim copy (minus print/CriticalPoint plumbing) of the body that lived in
 ``MapMaker_FoS_SHE.find_saddle_point_5d`` before the substitution.
 """
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -20,12 +19,9 @@ from pes_analyzer.saddle import find_iwf_grid
 REPO_ROOT = Path(__file__).parent.parent
 PARQUET_PATH = REPO_ROOT / "pes_Z120_N180.parquet"
 
-# Make MapMaker_FoS_SHE importable when running pytest from the repo root.
-sys.path.insert(0, str(REPO_ROOT))
-
 
 class _LegacyDSU:
-    """Verbatim copy of DisjointSetUnion from MapMaker_FoS_SHE.py (line 655)."""
+    """Verbatim copy of DisjointSetUnion from MapMaker_FoS_SHE.py:671."""
 
     def __init__(self, n: int):
         self.parent = list(range(n))
@@ -47,7 +43,7 @@ class _LegacyDSU:
 
 
 def _legacy_neighbors_5d(key, shape, energy_map):
-    """Verbatim copy of Grid5D.get_neighbors_5d (line 164)."""
+    """Verbatim copy of Grid5D.get_neighbors_5d from MapMaker_FoS_SHE.py:165."""
     ic, ia3, ia4, ia5, ia6 = key
     nc, na3, na4, na5, na6 = shape
     neighbors = []

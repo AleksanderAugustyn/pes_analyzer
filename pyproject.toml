@@ -24,3 +24,6 @@ classifiers = [
 python-source = "python"
 module-name = "pes_analyzer._native"
 features = ["extension-module"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
