@@ -9,8 +9,11 @@ license = "MIT"
 name = "pes_analyzer"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.22", features = ["abi3-py310", "extension-module"] }
+pyo3 = { version = "0.22", features = ["abi3-py310"] }
 numpy = "0.22"
 ndarray = "0.16"
 
