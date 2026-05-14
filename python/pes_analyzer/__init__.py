@@ -10,9 +10,6 @@ import paths::
 """
 
 from pes_analyzer._native import minimum, saddle  # noqa: F401
+from pes_analyzer import grid  # noqa: F401
 
-# `pes_analyzer.grid` is a pure-Python submodule added in Task 6 of the
-# v0.2 plan. The re-export line `from pes_analyzer import grid` is added
-# at that point so that this docstring's import path resolves.
-
-__all__ = ["minimum", "saddle"]
+__all__ = ["minimum", "saddle", "grid"]
