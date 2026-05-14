@@ -790,6 +790,129 @@ def index_to_gridpoint(
     )
 
 
+def find_ground_state_nd(
+    all_minima: list[tuple[tuple[int, ...], float]],
+    axes: dict[str, np.ndarray],
+    energies: np.ndarray,
+    c_threshold: float,
+) -> tuple[tuple[int, ...] | None, float]:
+    """Pick the ground-state cell from sorted local minima.
+
+    Tries the global energy minimum across all cells (not just minima)
+    first; if it satisfies c <= c_threshold, returns it. Otherwise falls
+    back to the lowest local minimum with c <= c_threshold.
+
+    Matches the 5D pipeline semantics (which match the C++ reference).
+
+    Returns
+    -------
+    (idx, energy) - idx is None if no candidate satisfies the threshold.
+    """
+    if np.all(np.isnan(energies)):
+        return None, float('nan')
+    flat_argmin = int(np.nanargmin(energies))
+    global_idx = np.unravel_index(flat_argmin, energies.shape)
+    global_c = float(axes['c'][global_idx[list(axes).index('c')]])
+    global_e = float(energies[global_idx])
+    if global_c <= c_threshold:
+        return tuple(int(i) for i in global_idx), global_e
+
+    c_axis_pos = list(axes).index('c')
+    for idx, energy in all_minima:
+        c_val = float(axes['c'][idx[c_axis_pos]])
+        if c_val <= c_threshold:
+            return tuple(int(i) for i in idx), energy
+    return None, float('nan')
+
+
+def find_secondary_minimum_nd(
+    all_minima: list[tuple[tuple[int, ...], float]],
+    axes: dict[str, np.ndarray],
+    gs_idx: tuple[int, ...] | None,
+    *,
+    c_max: float,
+    a3_max: float,
+    a4_max: float,
+) -> tuple[tuple[int, ...] | None, float]:
+    """Pick the secondary minimum from sorted local minima.
+
+    Conditions (any condition referencing an inactive axis is silently
+    skipped):
+      - c > gs.c (always)
+      - c > gs.c + 0.1 OR a4 > gs.a4 + 0.1
+      - c <= c_max
+      - a3 <= a3_max
+      - a4 <= a4_max
+
+    Returns the first match (i.e. the lowest-energy match since
+    `all_minima` is sorted ascending), or (None, NaN).
+    """
+    if gs_idx is None:
+        return None, float('nan')
+
+    axes_list = list(axes)
+
+    def coord(idx: tuple[int, ...], name: str) -> float | None:
+        if name not in axes:
+            return None
+        return float(axes[name][idx[axes_list.index(name)]])
+
+    gs_c  = coord(gs_idx, 'c')
+    gs_a4 = coord(gs_idx, 'a4')
+
+    for idx, energy in all_minima:
+        c  = coord(idx, 'c')
+        a3 = coord(idx, 'a3')
+        a4 = coord(idx, 'a4')
+
+        if c is None or c <= gs_c:
+            continue
+        c_far  = c > gs_c + 0.1
+        a4_far = (a4 is not None and gs_a4 is not None and a4 > gs_a4 + 0.1)
+        if not (c_far or a4_far):
+            continue
+        if c > c_max:
+            continue
+        if a3 is not None and a3 > a3_max:
+            continue
+        if a4 is not None and a4 > a4_max:
+            continue
+        return tuple(int(i) for i in idx), energy
+    return None, float('nan')
+
+
+def find_fission_exit_nd(
+    energies: np.ndarray,
+    axes: dict[str, np.ndarray],
+    sm_idx: tuple[int, ...] | None,
+) -> tuple[tuple[int, ...] | None, float]:
+    """Global minimum (not necessarily local) of `energies` over cells
+    with c > sm.c + 0.05. Matches the 5D fission-exit semantics.
+    """
+    if sm_idx is None:
+        return None, float('nan')
+
+    axes_list = list(axes)
+    c_pos = axes_list.index('c')
+    sm_c = float(axes['c'][sm_idx[c_pos]])
+    c_threshold = sm_c + 0.05
+    c_threshold_idx = int(np.searchsorted(axes['c'], c_threshold, side='right'))
+
+    if c_threshold_idx >= energies.shape[c_pos]:
+        return None, float('nan')
+
+    slicer = [slice(None)] * energies.ndim
+    slicer[c_pos] = slice(c_threshold_idx, None)
+    sub = energies[tuple(slicer)]
+    if np.all(np.isnan(sub)):
+        return None, float('nan')
+    flat_argmin = int(np.nanargmin(sub))
+    sub_idx = np.unravel_index(flat_argmin, sub.shape)
+    full_idx = list(sub_idx)
+    full_idx[c_pos] += c_threshold_idx
+    return tuple(int(i) for i in full_idx), float(energies[tuple(full_idx)])
+
+
 class DisjointSetUnion:
     """Union-Find data structure for saddle point detection."""
 
