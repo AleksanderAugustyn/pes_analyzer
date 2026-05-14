@@ -952,6 +952,116 @@ def find_fission_exit_nd(
     return tuple(int(i) for i in full_idx), float(energies[tuple(full_idx)])
 
 
+def run_critical_point_analysis_nd(
+    df: pl.DataFrame,
+) -> tuple[
+    dict[CriticalPointType, CriticalPoint],
+    np.ndarray,
+    dict[str, np.ndarray],
+    dict[str, float],
+    dict[str, np.ndarray],
+]:
+    """Single dimension-agnostic critical-point pipeline (replaces the
+    paired run_critical_point_analysis / run_critical_point_analysis_5d).
+
+    Returns
+    -------
+    critical_points : dict[CriticalPointType, CriticalPoint]
+    energies        : dense N-D grid (used by the plot path).
+    axes            : sorted unique values per active axis.
+    inactive_axes   : {axis_name: constant_value} for present-but-constant axes.
+    components      : per-component dense N-D grids.
+    """
+    print("\n  --- Critical Point Analysis (N-D) ---")
+    t_total = time.perf_counter()
+
+    active_axes = detect_active_axes(df)
+    print(f"  Active axes: {active_axes}  (ndim = {len(active_axes)})")
+
+    print("\n  Step 0: Building dense grid")
+    t0 = time.perf_counter()
+    energies, axes, inactive_axes, components = build_grids(df, active_axes)
+    print(f"    Grid shape: {energies.shape}; "
+          f"non-NaN cells: {int(np.count_nonzero(~np.isnan(energies))):,}")
+    print(f"  [time] Step 0 (build grid): {time.perf_counter() - t0:.2f} s")
+
+    print("\n  Step 1: Finding all local minima")
+    t0 = time.perf_counter()
+    all_minima = find_minima_grid(energies)
+    print(f"    Found {len(all_minima)} local minima.")
+    print(f"  [time] Step 1 (local minima): {time.perf_counter() - t0:.2f} s")
+
+    print("\n  Step 2: Selecting Ground State")
+    gs_idx, gs_e = find_ground_state_nd(
+        all_minima, axes, energies,
+        c_threshold=GROUND_STATE_C_THRESHOLD,
+    )
+    if gs_idx is not None:
+        print(f"    ✓ Ground State at index {gs_idx}, E = {gs_e:.4f} MeV")
+    else:
+        print("    ✗ Ground State not found.")
+
+    print("\n  Step 3: Selecting Secondary Minimum")
+    sm_idx, sm_e = find_secondary_minimum_nd(
+        all_minima, axes, gs_idx,
+        c_max =SECONDARY_MINIMUM_C_MAX_THRESHOLD,
+        a3_max=SECONDARY_MINIMUM_A3_MAX_THRESHOLD,
+        a4_max=SECONDARY_MINIMUM_A4_MAX_THRESHOLD,
+    )
+    if sm_idx is not None:
+        print(f"    ✓ Secondary Minimum at index {sm_idx}, E = {sm_e:.4f} MeV")
+    else:
+        print("    ✗ Secondary Minimum not found.")
+
+    print("\n  Step 4: Selecting Fission Exit")
+    fe_idx, fe_e = find_fission_exit_nd(energies, axes, sm_idx)
+    if fe_idx is not None:
+        print(f"    ✓ Fission Exit at index {fe_idx}, E = {fe_e:.4f} MeV")
+
+    def _saddle(start_idx, end_idx, name):
+        if start_idx is None or end_idx is None:
+            return None, float('nan')
+        if np.isnan(energies[start_idx]) or np.isnan(energies[end_idx]):
+            return None, float('nan')
+        result = find_iwf_grid(energies, start_idx, end_idx)
+        if result is None:
+            return None, float('nan')
+        s_idx, s_e = result
+        s_idx = tuple(int(i) for i in s_idx)
+        print(f"    ✓ {name} at index {s_idx}, E = {s_e:.4f} MeV")
+        return s_idx, float(s_e)
+
+    print("\n  Step 5: Inner Saddle")
+    t0 = time.perf_counter()
+    inner_idx, inner_e = _saddle(gs_idx, sm_idx, "Inner Saddle")
+    print(f"  [time] Step 5 (inner saddle): {time.perf_counter() - t0:.2f} s")
+
+    print("\n  Step 6: Outer Saddle")
+    t0 = time.perf_counter()
+    outer_idx, outer_e = _saddle(sm_idx, fe_idx, "Outer Saddle")
+    print(f"  [time] Step 6 (outer saddle): {time.perf_counter() - t0:.2f} s")
+
+    def _to_cp(cp_type, name, idx, energy):
+        cp = CriticalPoint(cp_type, name)
+        if idx is None:
+            return cp
+        cp.point = index_to_gridpoint(idx, axes, inactive_axes, components, energy)
+        cp.found = True
+        return cp
+
+    critical_points = {
+        CriticalPointType.GROUND_STATE:      _to_cp(CriticalPointType.GROUND_STATE,      "Ground State",      gs_idx,    gs_e),
+        CriticalPointType.SECONDARY_MINIMUM: _to_cp(CriticalPointType.SECONDARY_MINIMUM, "Secondary Minimum", sm_idx,    sm_e),
+        CriticalPointType.FISSION_EXIT:      _to_cp(CriticalPointType.FISSION_EXIT,      "Fission Exit",      fe_idx,    fe_e),
+        CriticalPointType.FIRST_SADDLE:      _to_cp(CriticalPointType.FIRST_SADDLE,      "Inner Saddle",      inner_idx, inner_e),
+        CriticalPointType.SECOND_SADDLE:     _to_cp(CriticalPointType.SECOND_SADDLE,     "Outer Saddle",      outer_idx, outer_e),
+    }
+
+    print(f"\n  [time] Total critical point analysis: "
+          f"{time.perf_counter() - t_total:.2f} s")
+    return critical_points, energies, axes, inactive_axes, components
+
+
 class DisjointSetUnion:
     """Union-Find data structure for saddle point detection."""
 
