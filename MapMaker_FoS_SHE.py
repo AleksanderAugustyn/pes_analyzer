@@ -746,6 +746,50 @@ def build_5d_energy_grid(df: pl.DataFrame) -> Grid5D:
 # CRITICAL POINT ANALYSIS
 # =============================================================================
 
+def index_to_gridpoint(
+    idx: tuple[int, ...],
+    axes: dict[str, np.ndarray],
+    inactive_axes: dict[str, float],
+    components: dict[str, np.ndarray],
+    energy: float,
+) -> GridPoint:
+    """Build a GridPoint from an N-D index into the dense grid.
+
+    Per-axis fields (c, a3, ..., a8) are populated from `axes` for
+    active axes and from `inactive_axes` for present-but-constant axes;
+    any axis not in either dict stays at its dataclass default (0.0).
+
+    Energy components are looked up at the same N-D index in each
+    components ndarray.
+    """
+    coords = {name: float(axes[name][i]) for name, i in zip(axes, idx)}
+    flat = {**inactive_axes, **coords}
+
+    def comp(name: str) -> float:
+        if name in components:
+            return float(components[name][idx])
+        return float('nan')
+
+    return GridPoint(
+        c =flat.get('c',  0.0),
+        a3=flat.get('a3', 0.0),
+        a4=flat.get('a4', 0.0),
+        a5=flat.get('a5', 0.0),
+        a6=flat.get('a6', 0.0),
+        a7=flat.get('a7', 0.0),
+        a8=flat.get('a8', 0.0),
+        total_energy=float(energy),
+        mass_excess   = comp('mass_excess'),
+        macro_energy  = comp('macro_energy'),
+        micro_energy  = comp('micro_energy'),
+        surface_energy= comp('surface_energy'),
+        coulomb_energy= comp('coulomb_energy'),
+        valid=True,
+        index=tuple(int(i) for i in idx),
+        coords=coords,
+    )
+
+
 class DisjointSetUnion:
     """Union-Find data structure for saddle point detection."""
 
