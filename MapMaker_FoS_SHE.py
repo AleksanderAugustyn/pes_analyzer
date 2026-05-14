@@ -456,6 +456,45 @@ def read_parquet_file(filename: str | Path) -> pl.DataFrame:
 # MINIMIZATION AND GRID OPERATIONS
 # =============================================================================
 
+def minimize_to_2d(
+    energies: np.ndarray,
+    axes: dict[str, np.ndarray],
+    x_axis: str,
+    y_axis: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Project N-D energies down to a 2D (x_axis, y_axis) surface by
+    taking the per-(x, y) minimum over all remaining axes.
+
+    Returns
+    -------
+    xv, yv : 1-D arrays of x_axis / y_axis coordinate values.
+    energy_2d : (nx, ny) float64 array of minimized energies; NaN where
+                the entire (x, y) column is all-NaN.
+    argmin_flat : (nx, ny) int array - index into the flattened
+                  "remaining axes" stack identifying the minimizing
+                  cell. Apply the same transpose+reshape to any parallel
+                  N-D ndarray and gather with np.take_along_axis(...,
+                  argmin_flat[..., None], -1).squeeze(-1). Values are
+                  undefined where energy_2d is NaN; caller must mask.
+
+    For the 2-D edge case (only x_axis and y_axis active), the
+    "remaining axes" stack has length 1 and argmin_flat is uniformly 0.
+    """
+    axes_idx = {n: i for i, n in enumerate(axes)}
+    order = [axes_idx[x_axis], axes_idx[y_axis]] + [
+        i for i, n in enumerate(axes) if n not in (x_axis, y_axis)
+    ]
+    moved = energies.transpose(order)
+    nx, ny = moved.shape[0], moved.shape[1]
+    flat = moved.reshape(nx, ny, -1)
+    all_nan = np.all(np.isnan(flat), axis=-1)
+    flat_safe = np.where(np.isnan(flat), np.inf, flat)
+    argmin_flat = np.argmin(flat_safe, axis=-1)
+    energy_2d = np.take_along_axis(flat, argmin_flat[..., None], -1).squeeze(-1)
+    energy_2d[all_nan] = np.nan
+    return axes[x_axis], axes[y_axis], energy_2d, argmin_flat
+
+
 def minimize_over_deformations(df: pl.DataFrame) -> tuple:
     """
     For each (c, a4), find the minimum total_energy over a3, a5, a6, a7, a8.
