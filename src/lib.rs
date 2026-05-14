@@ -13,6 +13,7 @@
 use pyo3::prelude::*;
 
 mod common;
+mod minimum;
 mod saddle;
 
 #[pymodule]
