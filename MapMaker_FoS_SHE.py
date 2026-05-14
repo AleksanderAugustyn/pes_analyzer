@@ -495,6 +495,70 @@ def minimize_to_2d(
     return axes[x_axis], axes[y_axis], energy_2d, argmin_flat
 
 
+def save_minimized_data_2d(
+    xv: np.ndarray,
+    yv: np.ndarray,
+    e2d: np.ndarray,
+    argmin_flat: np.ndarray,
+    axes: dict[str, np.ndarray],
+    inactive_axes: dict[str, float],
+    x_axis: str,
+    y_axis: str,
+    output_name: str,
+    output_dir: str = 'minimized_data_FoS',
+) -> Path:
+    """Write the minimized (x_axis, y_axis) CSV.
+
+    Column order matches the legacy save_minimized_data:
+        c, <y_axis>, <ax_min for each ax in (a3,a4,a5,a6,a7,a8) - {y_axis}>,
+        total_energy_min
+
+    Inactive axes contribute their constant value from `inactive_axes`.
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
+
+    rest_names = [n for n in axes if n not in (x_axis, y_axis)]
+    rest_shape = tuple(len(axes[n]) for n in rest_names)
+
+    if rest_shape:
+        unraveled = np.unravel_index(argmin_flat, rest_shape)
+        rest_value_at_min = {
+            n: axes[n][unraveled[i]] for i, n in enumerate(rest_names)
+        }
+    else:
+        rest_value_at_min = {}
+
+    minimized_axes = [ax for ax in ('a3', 'a4', 'a5', 'a6', 'a7', 'a8')
+                      if ax != y_axis]
+
+    mask = ~np.isnan(e2d)
+    x_grid, y_grid = np.meshgrid(xv, yv, indexing='ij')
+
+    columns: dict[str, np.ndarray] = {
+        x_axis: x_grid[mask].astype(np.float64),
+        y_axis: y_grid[mask].astype(np.float64),
+    }
+    for ax in minimized_axes:
+        col_name = f'{ax}_min'
+        if ax in rest_value_at_min:
+            columns[col_name] = rest_value_at_min[ax][mask].astype(np.float64)
+        elif ax in inactive_axes:
+            columns[col_name] = np.full(int(mask.sum()), inactive_axes[ax],
+                                        dtype=np.float64)
+        else:
+            columns[col_name] = np.zeros(int(mask.sum()), dtype=np.float64)
+    columns['total_energy_min'] = e2d[mask].astype(np.float64)
+
+    out_df = pl.DataFrame(columns)
+    out_df = out_df.sort([x_axis, y_axis])
+    suffix = '_minimized.csv' if y_axis == 'a4' else f'_minimized_c{y_axis}.csv'
+    output_file = output_path / f'{output_name}{suffix}'
+    out_df.write_csv(output_file, float_precision=6)
+    print(f"    Saved minimized data: {output_file}")
+    return output_file
+
+
 def minimize_over_deformations(df: pl.DataFrame) -> tuple:
     """
     For each (c, a4), find the minimum total_energy over a3, a5, a6, a7, a8.
@@ -2043,73 +2107,52 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
 
 def process_single_file(parquet_file: Path, output_plot: str = None,
                         save_minimized: bool = True) -> dict:
-    """
-    Process a single parquet file: analyze critical points and create plot.
-
-    When USE_5D_ANALYSIS is True, critical point detection runs on the full 5D
-    (c, a3, a4, a5, a6) space. The 2D minimized surface is still used for plotting.
-
-    Returns dictionary with results for potential batch processing.
+    """Process a single parquet file: dimension-agnostic critical-point
+    analysis + plot the (c, a3) and (c, a4) projections where those
+    axes are active.
     """
     print(f"\n{'=' * 70}")
     print(f"Processing: {parquet_file.name}")
     print('=' * 70)
 
-    # Extract nucleus info
     nucleus = extract_nucleus_info(parquet_file)
     print(f"  Nucleus: {nucleus.isotope_label} (Z={nucleus.Z}, N={nucleus.N})")
 
-    # Read data
     df = read_parquet_file(parquet_file)
 
-    # Run critical point analysis (5D or 2D based on configuration)
-    if USE_5D_ANALYSIS:
-        print(f"\n  Using 5D critical point analysis")
-        critical_points = run_critical_point_analysis_5d(df)
-    else:
-        print(f"\n  Using 2D critical point analysis")
-        # For 2D analysis, minimize first then run analysis
-        result = minimize_over_deformations(df)
-        c, a4, energy, a3, a5, a6, a7, a8, mass_excess, macro_e, micro_e, surf_e, coul_e = result
-        critical_points = run_critical_point_analysis(c, a4, energy, a3, a5, a6, a7, a8,
-                                                      mass_excess, macro_e, micro_e, surf_e, coul_e)
+    critical_points, energies, axes, inactive_axes, components = \
+        run_critical_point_analysis_nd(df)
 
-    # Print summary
     print_analysis_summary(critical_points, nucleus)
-
-    # Save critical points
     save_critical_points_csv(critical_points, nucleus)
 
-    # Minimize over deformations for plotting (always needed for 2D visualization)
-    result_ca4 = minimize_over_deformations(df)
-    c, a4, energy, a3, a5, a6, a7, a8, mass_excess, macro_e, micro_e, surf_e, coul_e = result_ca4
-
-    # Save minimized data (c vs a4)
     output_name = parquet_file.stem
-    if save_minimized:
-        save_minimized_data(c, a4, energy, a3, a5, a6, a7, a8, output_name)
+    active_axes = tuple(axes.keys())
 
-    # Create c vs a4 plot (2D contour with critical points projected onto it)
-    if output_plot:
-        output_filename = output_plot
-    else:
-        output_filename = f'{output_name}_c_vs_a4.png'
+    for y_axis in ('a3', 'a4'):
+        if y_axis not in active_axes:
+            print(f"  Skipping c-vs-{y_axis} plot ({y_axis} not active)")
+            continue
 
-    create_contour_plot(c, a4, energy, nucleus, output_filename, critical_points, y_param='a4')
+        xv, yv, e2d, argmin_flat = minimize_to_2d(energies, axes, 'c', y_axis)
+        if save_minimized:
+            save_minimized_data_2d(xv, yv, e2d, argmin_flat,
+                                   axes, inactive_axes,
+                                   'c', y_axis, output_name)
 
-    # --- c vs a3 surface ---
-    result_ca3 = minimize_over_deformations_ca3(df)
-    c3, a3_y, energy3, a4_min3, a5_min3, a6_min3, a7_min3, a8_min3, *_ = result_ca3
+        if y_axis == 'a4' and output_plot:
+            output_filename = output_plot
+        else:
+            output_filename = f'{output_name}_c_vs_{y_axis}.png'
 
-    if save_minimized:
-        save_minimized_data(c3, a4_min3, energy3, a3_y, a5_min3, a6_min3, a7_min3, a8_min3,
-                            output_name, y_param='a3')
+        c_grid, y_grid = np.meshgrid(xv, yv, indexing='ij')
+        mask = ~np.isnan(e2d)
+        c_flat = c_grid[mask]
+        y_flat = y_grid[mask]
+        e_flat = e2d[mask]
+        create_contour_plot(c_flat, y_flat, e_flat, nucleus, output_filename,
+                            critical_points, y_param=y_axis)
 
-    output_filename_ca3 = f'{output_name}_c_vs_a3.png'
-    create_contour_plot(c3, a3_y, energy3, nucleus, output_filename_ca3,
-                        critical_points, y_param='a3')
-
-    # Calculate fission barriers
     barriers = calculate_fission_barriers(critical_points, nucleus)
 
     return {
@@ -2117,7 +2160,6 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
         'nucleus': nucleus,
         'critical_points': critical_points,
         'barriers': barriers,
-        'c': c, 'a4': a4, 'energy': energy,
     }
 
 
