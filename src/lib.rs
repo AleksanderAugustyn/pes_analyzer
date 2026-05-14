@@ -18,6 +18,7 @@ mod saddle;
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    minimum::register(m)?;
     saddle::register(m)?;
     Ok(())
 }
