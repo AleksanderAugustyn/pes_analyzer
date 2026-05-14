@@ -1,7 +1,9 @@
 /target
 /docs
+/.claude
 *.so
 *.pyd
+*.parquet
 __pycache__/
 *.egg-info/
 .venv/
