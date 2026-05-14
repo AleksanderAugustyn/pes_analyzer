@@ -41,7 +41,9 @@ import polars as pl
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
 
-from pes_analyzer.saddle import find_iwf_grid
+from pes_analyzer.saddle  import find_iwf_grid
+from pes_analyzer.minimum import find_minima_grid
+from pes_analyzer.grid    import build_dense
 
 # =============================================================================
 # CONFIGURATION
@@ -58,6 +60,10 @@ USE_5D_ANALYSIS = True
 
 # Columns to minimize over (all deformation parameters except c and a4)
 MINIMIZE_OVER = ['a3', 'a5', 'a6', 'a7', 'a8']
+
+# Axes that may be active. The actual active set is auto-detected per file
+# from the parquet contents (any column with >1 unique value).
+CANDIDATE_AXES = ('c', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8')
 
 # =============================================================================
 # SHAPE PARAMETER LIMITS
@@ -292,6 +298,65 @@ def apply_parameter_limits(df: pl.DataFrame) -> pl.DataFrame:
               f"({initial_count - filtered_count:,} removed)")
 
     return df
+
+
+def detect_active_axes(df: pl.DataFrame) -> tuple[str, ...]:
+    """Return the tuple of axis names with more than one unique value.
+
+    Axis order follows CANDIDATE_AXES so `c` is always first. Axes
+    present in the file but constant (e.g. a7=a8=0.0 in current data)
+    are excluded.
+    """
+    return tuple(
+        name for name in CANDIDATE_AXES
+        if name in df.columns and df[name].n_unique() > 1
+    )
+
+
+def build_grids(
+    df: pl.DataFrame, active_axes: tuple[str, ...]
+) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, float], dict[str, np.ndarray]]:
+    """Dense N-D energy grid + component grids + inactive-axis constants.
+
+    Parameters
+    ----------
+    df
+        DataFrame containing at least the active axes and 'total_energy'.
+    active_axes
+        Output of detect_active_axes(df); insertion order is the axis
+        order of the returned ndarrays.
+
+    Returns
+    -------
+    energies
+        (n_a0, n_a1, ..., n_aN) float64, NaN at missing cells.
+    axes
+        {axis_name: sorted unique values along that axis}.
+    inactive_axes
+        {axis_name: constant_value} for every CANDIDATE_AXES entry that
+        is in the file but not active. Used to fill CSV columns.
+    components
+        {'mass_excess': ndarray, 'macro_energy': ndarray, ...}, one per
+        present energy-component column. Same shape as `energies`.
+    """
+    coords = {name: df[name].to_numpy() for name in active_axes}
+    values = df['total_energy'].to_numpy()
+    energies, axes = build_dense(coords, values)
+
+    components: dict[str, np.ndarray] = {}
+    for cname in ('mass_excess', 'macro_energy', 'micro_energy',
+                  'surface_energy', 'coulomb_energy'):
+        if cname in df.columns:
+            cvals = df[cname].to_numpy()
+            comp_dense, _ = build_dense(coords, cvals)
+            components[cname] = comp_dense
+
+    inactive_axes: dict[str, float] = {}
+    for name in CANDIDATE_AXES:
+        if name not in active_axes and name in df.columns:
+            inactive_axes[name] = float(df[name].unique().to_numpy()[0])
+
+    return energies, axes, inactive_axes, components
 
 
 # =============================================================================
