@@ -1,3 +1,54 @@
 //! `pes_analyzer.minimum` submodule: local-minimum search algorithms.
 
 pub mod local_minima;
+
+use numpy::{PyReadonlyArrayDyn, PyUntypedArrayMethods};
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PyList, PyModule, PyTuple};
+
+use crate::common::validate::{check_ndim, check_total_cells_fit_u32};
+
+#[pyfunction]
+#[pyo3(name = "find_minima_grid")]
+fn py_find_minima_grid<'py>(
+    py: Python<'py>,
+    energies: PyReadonlyArrayDyn<'py, f64>,
+) -> PyResult<Py<PyList>> {
+    if !energies.is_c_contiguous() {
+        return Err(PyValueError::new_err(
+            "energies must be C-contiguous; call np.ascontiguousarray(energies) if you intend a copy",
+        ));
+    }
+
+    let arr = energies.as_array();
+    check_ndim(arr.ndim())?;
+    check_total_cells_fit_u32(arr.len())?;
+
+    // Compute under released GIL.
+    let result = py.allow_threads(|| local_minima::local_minima_inner(arr));
+
+    // Build Python list of (tuple[int, ...], float).
+    let list = PyList::empty_bound(py);
+    for (idx, energy) in result {
+        let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py)));
+        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.into_py(py)]);
+        list.append(pair)?;
+    }
+    Ok(list.unbind())
+}
+
+/// Register the `minimum` submodule on `parent`. Also inserts the submodule
+/// into `sys.modules` under the dotted name `pes_analyzer.minimum` so that
+/// `from pes_analyzer.minimum import find_minima_grid` works at runtime.
+pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = parent.py();
+    let m = PyModule::new_bound(py, "minimum")?;
+    m.add_function(wrap_pyfunction!(py_find_minima_grid, &m)?)?;
+    parent.add_submodule(&m)?;
+
+    let sys = py.import_bound("sys")?;
+    let modules = sys.getattr("modules")?;
+    modules.set_item("pes_analyzer.minimum", &m)?;
+    Ok(())
+}
