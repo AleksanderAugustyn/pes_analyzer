@@ -110,8 +110,14 @@ class CriticalPointType(Enum):
 
 @dataclass
 class GridPoint:
-    """Represents a point on the deformation grid with all coordinates and energy."""
-    c: float = 0.0
+    """Represents a point on the deformation grid with all coordinates and energy.
+
+    The legacy per-axis fields (c, a3, ..., a8) are preserved as a flat
+    convenience view for CSV writers and plotting code. The N-D index
+    (`index`) and the coords dict (`coords`) are the authoritative
+    sources of truth for the dimension-agnostic pipeline.
+    """
+    c:  float = 0.0
     a3: float = 0.0
     a4: float = 0.0
     a5: float = 0.0
@@ -121,12 +127,17 @@ class GridPoint:
     c_idx: int = 0
     a4_idx: int = 0
     total_energy: float = np.inf
-    mass_excess: float = np.nan
-    macro_energy: float = np.nan
-    micro_energy: float = np.nan
+    mass_excess:    float = np.nan
+    macro_energy:   float = np.nan
+    micro_energy:   float = np.nan
     surface_energy: float = np.nan
     coulomb_energy: float = np.nan
     valid: bool = False
+    # New, used by the dimension-agnostic pipeline. Default to empties so
+    # the legacy 2D/5D code paths still construct GridPoint without
+    # naming them.
+    index:  tuple[int, ...] = field(default_factory=tuple)
+    coords: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
