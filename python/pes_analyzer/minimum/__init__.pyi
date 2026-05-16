@@ -11,9 +11,10 @@ import numpy.typing as npt
 def find_minima_grid(
     energies: npt.NDArray[np.float64],
 ) -> list[tuple[tuple[int, ...], float]]:
-    """Find all strict local minima on a dense N-D energy grid using the
-    full 3ᴺ−1 (king-move) neighborhood.
+    """Find all local minima on a dense N-D energy grid using the full
+    3ᴺ−1 (king-move) neighborhood. A cell qualifies when no king-move
+    neighbor has strictly lower energy (ties are allowed).
 
-    See ``docs/SPEC.md`` §3.6 for the full contract.
+    See ``API.md`` (``find_minima_grid``) for the full contract.
     """
     ...

@@ -1,4 +1,4 @@
-"""Tests for the error contract in SPEC.md §3.4 and the addendum §1.3."""
+"""Tests for the input-validation error contract of the public PyO3 wrappers."""
 
 import numpy as np
 import pytest

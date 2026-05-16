@@ -19,6 +19,6 @@ def find_iwf_grid(
     """Find the saddle point between ``start`` and ``end`` on a pre-computed
     energy grid using the imaginary water flow (watershed) algorithm.
 
-    See ``SPEC.md`` §3.2 for the full contract.
+    See ``API.md`` (``find_iwf_grid``) for the full contract.
     """
     ...
