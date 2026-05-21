@@ -133,6 +133,7 @@ def find_minima_grid(
     energies: numpy.ndarray[float64],
     *,
     neighborhood_range: int = 1,
+    confirm_range: int | None = None,
 ) -> list[tuple[tuple[int, ...], float]]:
     ...
 ```
@@ -141,6 +142,7 @@ def find_minima_grid(
 
 - **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are skipped.
 - **`neighborhood_range`** *(keyword-only, default `1`)* — Chebyshev half-width `r` of the neighbor stencil. A cell is compared against every in-bounds neighbor with `max_axis |Δi| ≤ r` (the `(2r+1)ᴺ − 1` stencil). Must satisfy `1 ≤ r ≤ 5`. The default `r = 1` is the classic 3ᴺ−1 king-move stencil.
+- **`confirm_range`** *(keyword-only, default `None`)* — optional second-pass check. When `None`, the function returns the direct `neighborhood_range`-stencil minima. When set to an integer `R`, the function first finds candidates at `neighborhood_range` and then re-checks each candidate against the `R`-wide stencil. Must satisfy `1 ≤ R ≤ 5` and `R ≥ neighborhood_range`. The result for `neighborhood_range=1, confirm_range=R` is identical to `neighborhood_range=R` but typically much cheaper, since most cells are culled by the `r=1` pass.
 
 ### Returns
 
@@ -148,9 +150,9 @@ def find_minima_grid(
 
 ### Raises
 
-- `ValueError` if `energies` is not C-contiguous, if `energies.ndim` is outside `[2, 7]`, or if `neighborhood_range` is outside `[1, 5]`.
-- `TypeError` if `neighborhood_range` is passed positionally or is not an `int`.
-- `OverflowError` if `neighborhood_range` is negative.
+- `ValueError` if `energies` is not C-contiguous, if `energies.ndim` is outside `[2, 7]`, if `neighborhood_range` is outside `[1, 5]`, if `confirm_range` is outside `[1, 5]`, or if `confirm_range < neighborhood_range`.
+- `TypeError` if `neighborhood_range` or `confirm_range` is passed positionally or is not an `int`/`None`.
+- `OverflowError` if `neighborhood_range` or `confirm_range` is negative.
 
 ### What it does
 
@@ -195,6 +197,15 @@ print(find_minima_grid(energies, neighborhood_range=2))
 
 At `r = 1`, `(2, 2)` is a minimum because all eight king-move neighbours are `5.0`. At `r = 2`, the 5×5 stencil around `(2, 2)` reaches `(4, 0) = 1.0` — strictly lower — and `(2, 2)` is no longer reported.
 
+The recommended way to compute the same result more cheaply is to find candidates at `r = 1` and confirm against the wider stencil:
+
+```python
+# Same result as neighborhood_range=2, but cheaper: only candidates that
+# pass the r=1 check are re-tested against the wider stencil.
+print(find_minima_grid(energies, neighborhood_range=1, confirm_range=2))
+# [((4, 0), 1.0)]
+```
+
 ### Notes and edge cases
 
 - **Plateaus are reported.** Every cell on a flat plateau that has no king-move neighbour with strictly lower energy qualifies. In a uniformly-flat region, every cell whose stencil contains no lower neighbour will appear in the output — including corner and edge cells of the plateau where the stencil happens to be entirely within the plateau. If you only want strictly-isolated minima, filter the output yourself.
@@ -212,3 +223,5 @@ At `r = 1`, `(2, 2)` is a minimum because all eight king-move neighbours are `5.
 | `ValueError: index ... out of bounds for shape ...` | `start`/`end` outside the grid | check tuple length and values |
 | `ValueError: energy at \`start\` is NaN` | endpoint cell is masked | pick an endpoint inside the non-`NaN` region |
 | `ValueError: neighborhood_range must be in [1, 5]` | passed `0` or `> 5` | choose `neighborhood_range ∈ {1, 2, 3, 4, 5}` |
+| `ValueError: confirm_range must be in [1, 5]` | passed `0` or `> 5` | choose `confirm_range ∈ {1, 2, 3, 4, 5}` or `None` |
+| `ValueError: confirm_range (c) must be >= neighborhood_range (n)` | `confirm_range < neighborhood_range` | raise `confirm_range` or lower `neighborhood_range` (most callers want `neighborhood_range=1, confirm_range=R`) |
