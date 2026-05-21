@@ -1,6 +1,6 @@
 [package]
 name = "pes_analyzer"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Fast saddle-point analysis on dense N-D PES grids"
 license = "MIT"
