@@ -368,4 +368,31 @@ mod tests {
         assert!(coords_2p.contains(&vec![4, 4]));
         assert_eq!(coords_2p.len(), 2);
     }
+
+    #[test]
+    fn find_1_confirm_r_equivalence_with_nan_walls() {
+        // 5x5 grid with a vertical NaN strip at column 2 and two planted
+        // minima at (1,1)=3 and (1,3)=1. At r=1 both survive because their
+        // non-NaN neighbours are all higher. At r >= 2 they see each other
+        // across the NaN strip (NaN cells are skipped, not blocking), so
+        // (1,1)=3 is culled by (1,3)=1. The two-pass invariant
+        // local_minima_inner(arr, 1, Some(R)) == local_minima_inner(arr, R, None)
+        // must hold even when NaN cells fall inside the stencil.
+        let n = f64::NAN;
+        #[rustfmt::skip]
+        let e = vec![
+            5.0, 5.0, 5.0, 5.0, 5.0,
+            5.0, 3.0,   n, 1.0, 5.0,
+            5.0, 5.0,   n, 5.0, 5.0,
+            5.0, 5.0,   n, 5.0, 5.0,
+            5.0, 5.0, 5.0, 5.0, 5.0,
+        ];
+        let arr = to_dyn([5, 5], e);
+
+        for r in 2usize..=4 {
+            let two_pass = local_minima_inner(arr.view(), 1, Some(r));
+            let direct = local_minima_inner(arr.view(), r, None);
+            assert_eq!(two_pass, direct, "mismatch at r={r}");
+        }
+    }
 }
