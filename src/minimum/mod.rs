@@ -7,14 +7,20 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
 
-use crate::common::validate::{check_ndim, check_neighborhood_range, check_total_cells_fit_u32};
+use crate::common::validate::{
+    check_confirm_range, check_ndim, check_neighborhood_range, check_total_cells_fit_u32,
+};
 
 #[pyfunction]
-#[pyo3(name = "find_minima_grid", signature = (energies, *, neighborhood_range = 1))]
+#[pyo3(
+    name = "find_minima_grid",
+    signature = (energies, *, neighborhood_range = 1, confirm_range = None)
+)]
 fn py_find_minima_grid<'py>(
     py: Python<'py>,
     energies: PyReadonlyArrayDyn<'py, f64>,
     neighborhood_range: usize,
+    confirm_range: Option<usize>,
 ) -> PyResult<Py<PyList>> {
     if !energies.is_c_contiguous() {
         return Err(PyValueError::new_err(
@@ -26,10 +32,12 @@ fn py_find_minima_grid<'py>(
     check_ndim(arr.ndim())?;
     check_total_cells_fit_u32(arr.len())?;
     check_neighborhood_range(neighborhood_range)?;
+    check_confirm_range(confirm_range, neighborhood_range)?;
 
     // Compute under released GIL.
-    let result =
-        py.allow_threads(|| local_minima::local_minima_inner(arr, neighborhood_range, None));
+    let result = py.allow_threads(|| {
+        local_minima::local_minima_inner(arr, neighborhood_range, confirm_range)
+    });
 
     // Build Python list of (tuple[int, ...], float).
     let list = PyList::empty_bound(py);
