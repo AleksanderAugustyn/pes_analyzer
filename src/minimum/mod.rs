@@ -28,7 +28,8 @@ fn py_find_minima_grid<'py>(
     check_neighborhood_range(neighborhood_range)?;
 
     // Compute under released GIL.
-    let result = py.allow_threads(|| local_minima::local_minima_inner(arr, neighborhood_range));
+    let result =
+        py.allow_threads(|| local_minima::local_minima_inner(arr, neighborhood_range, None));
 
     // Build Python list of (tuple[int, ...], float).
     let list = PyList::empty_bound(py);

@@ -9,8 +9,14 @@ use ndarray::ArrayViewD;
 use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
 
 /// Find all strict local minima in `energies` using the Chebyshev box of
-/// half-width `r` (i.e. the (2r+1)ᴺ−1 stencil; `r = 1` is the classic
-/// king-move 3ᴺ−1 connectivity).
+/// half-width `find_r` (i.e. the `(2*find_r+1)ᴺ−1` stencil; `find_r = 1`
+/// is the classic king-move 3ᴺ−1 connectivity).
+///
+/// If `confirm_r` is `Some(R)` with `R > find_r`, each stage-1 candidate
+/// is re-checked against the wider `R`-stencil and only those that still
+/// have no strictly-lower non-NaN neighbour are kept. When `confirm_r`
+/// is `None` (or `Some(R)` with `R <= find_r`), the stage-2 pass is
+/// skipped — behaviour is identical to a direct check at `find_r`.
 ///
 /// Returns a vector of `(nd_index, energy)` for every qualifying cell,
 /// sorted ascending by energy (ties broken by `f64::total_cmp` for
@@ -20,23 +26,30 @@ use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
 /// - `energies` is a view over a C-contiguous f64 buffer.
 /// - `energies.ndim()` is in `[2, 7]`.
 /// - `energies.len() <= u32::MAX`.
-/// - `r >= 1` (validated upstream).
-pub fn local_minima_inner(energies: ArrayViewD<'_, f64>, r: usize) -> Vec<(Vec<usize>, f64)> {
+/// - `find_r >= 1` (validated upstream).
+/// - `confirm_r`, if `Some(R)`, satisfies `R in [1, 5]` and `R >= find_r`.
+pub fn local_minima_inner(
+    energies: ArrayViewD<'_, f64>,
+    find_r: usize,
+    confirm_r: Option<usize>,
+) -> Vec<(Vec<usize>, f64)> {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
     let flat: &[f64] = energies
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
-    let stencil_max = (2 * r + 1).saturating_pow(shape.len() as u32);
+    // Stage 1: find candidates at `find_r`. Keep `lin` so stage 2 can
+    // call `full_neighbors` without recomputing the nd-index.
+    let stencil_max = (2 * find_r + 1).saturating_pow(shape.len() as u32);
     let mut nbrs: Vec<usize> = Vec::with_capacity(stencil_max);
-    let mut out: Vec<(Vec<usize>, f64)> = Vec::new();
+    let mut candidates: Vec<(usize, f64)> = Vec::new();
 
     for (lin, &e) in flat.iter().enumerate() {
         if e.is_nan() {
             continue;
         }
-        full_neighbors(lin, &shape, &strides, r, &mut nbrs);
+        full_neighbors(lin, &shape, &strides, find_r, &mut nbrs);
 
         let mut has_valid_neighbor = false;
         let mut beats_all = true;
@@ -53,10 +66,46 @@ pub fn local_minima_inner(energies: ArrayViewD<'_, f64>, r: usize) -> Vec<(Vec<u
         }
 
         if has_valid_neighbor && beats_all {
-            out.push((linear_to_index(lin, &shape, &strides), e));
+            candidates.push((lin, e));
         }
     }
 
+    // Stage 2: confirm against the wider `confirm_r` stencil if requested
+    // AND strictly wider than `find_r`. The equal case is a no-op and
+    // skipping it avoids redundant work.
+    let survivors: Vec<(usize, f64)> = match confirm_r {
+        Some(r) if r > find_r => {
+            let stencil_max_r = (2 * r + 1).saturating_pow(shape.len() as u32);
+            let mut nbrs_r: Vec<usize> = Vec::with_capacity(stencil_max_r);
+            let mut kept: Vec<(usize, f64)> = Vec::with_capacity(candidates.len());
+            for (lin, e) in candidates {
+                full_neighbors(lin, &shape, &strides, r, &mut nbrs_r);
+                let mut has_valid_neighbor = false;
+                let mut beats_all = true;
+                for &nbr_lin in &nbrs_r {
+                    let ne = flat[nbr_lin];
+                    if ne.is_nan() {
+                        continue;
+                    }
+                    has_valid_neighbor = true;
+                    if ne < e {
+                        beats_all = false;
+                        break;
+                    }
+                }
+                if has_valid_neighbor && beats_all {
+                    kept.push((lin, e));
+                }
+            }
+            kept
+        }
+        _ => candidates,
+    };
+
+    let mut out: Vec<(Vec<usize>, f64)> = survivors
+        .into_iter()
+        .map(|(lin, e)| (linear_to_index(lin, &shape, &strides), e))
+        .collect();
     out.sort_by(|a, b| a.1.total_cmp(&b.1));
     out
 }
@@ -75,7 +124,7 @@ mod tests {
         // 3x3 bowl: center is 0, surroundings are 1.
         let e = vec![1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0];
         let arr = to_dyn([3, 3], e);
-        let mins = local_minima_inner(arr.view(), 1);
+        let mins = local_minima_inner(arr.view(), 1, None);
         assert_eq!(mins.len(), 1);
         assert_eq!(mins[0].0, vec![1, 1]);
         assert_eq!(mins[0].1, 0.0);
@@ -94,7 +143,7 @@ mod tests {
         e[19] = 1.0;
         e[18] = 2.0;
         let arr = to_dyn([5, 5], e);
-        let mins = local_minima_inner(arr.view(), 1);
+        let mins = local_minima_inner(arr.view(), 1, None);
         let coords: Vec<Vec<usize>> = mins.iter().map(|(c, _)| c.clone()).collect();
         assert!(coords.contains(&vec![0, 0]));
         assert!(coords.contains(&vec![4, 4]));
@@ -110,7 +159,7 @@ mod tests {
             10.0, 10.0, 10.0, // row 2
         ];
         let arr = to_dyn([3, 3], e);
-        let mins = local_minima_inner(arr.view(), 1);
+        let mins = local_minima_inner(arr.view(), 1, None);
         let coords: Vec<Vec<usize>> = mins.iter().map(|(c, _)| c.clone()).collect();
         assert!(!coords.contains(&vec![1, 1]));
         assert!(coords.contains(&vec![0, 0]));
@@ -126,7 +175,7 @@ mod tests {
             1.0, 1.0, 1.0, 1.0, //
         ];
         let arr = to_dyn([3, 4], e);
-        let mins = local_minima_inner(arr.view(), 1);
+        let mins = local_minima_inner(arr.view(), 1, None);
         let coords: Vec<Vec<usize>> = mins.iter().map(|(c, _)| c.clone()).collect();
         assert!(coords.contains(&vec![1, 1]));
         assert!(coords.contains(&vec![1, 2]));
@@ -139,7 +188,7 @@ mod tests {
         let n = f64::NAN;
         let e = vec![n, n, n, n, 0.0, n, n, n, n];
         let arr = to_dyn([3, 3], e);
-        let mins = local_minima_inner(arr.view(), 1);
+        let mins = local_minima_inner(arr.view(), 1, None);
         assert!(mins.is_empty());
     }
 
@@ -151,7 +200,7 @@ mod tests {
         e[0] = 2.0;
         e[24] = 1.0;
         let arr = to_dyn([5, 5], e);
-        let mins = local_minima_inner(arr.view(), 1);
+        let mins = local_minima_inner(arr.view(), 1, None);
         assert_eq!(mins.len(), 2);
         assert!(mins[0].1 <= mins[1].1);
         assert_eq!(mins[0].0, vec![4, 4]);
@@ -173,7 +222,7 @@ mod tests {
             data[center_lin] = 0.0;
 
             let arr = Array::from_shape_vec(IxDyn(&shape), data).unwrap();
-            let mins = local_minima_inner(arr.view(), 1);
+            let mins = local_minima_inner(arr.view(), 1, None);
             assert_eq!(mins.len(), 1, "ndim={ndim}");
             assert_eq!(mins[0].0, vec![1; ndim], "ndim={ndim}");
             assert_eq!(mins[0].1, 0.0, "ndim={ndim}");
@@ -198,12 +247,12 @@ mod tests {
         e[4 * 5 + 4] = 1.0;
         let arr = to_dyn([5, 5], e);
 
-        let mins_r1 = local_minima_inner(arr.view(), 1);
+        let mins_r1 = local_minima_inner(arr.view(), 1, None);
         let coords_r1: Vec<Vec<usize>> = mins_r1.iter().map(|(c, _)| c.clone()).collect();
         assert!(coords_r1.contains(&vec![2, 2]));
         assert!(coords_r1.contains(&vec![4, 4]));
 
-        let mins_r2 = local_minima_inner(arr.view(), 2);
+        let mins_r2 = local_minima_inner(arr.view(), 2, None);
         let coords_r2: Vec<Vec<usize>> = mins_r2.iter().map(|(c, _)| c.clone()).collect();
         assert!(!coords_r2.contains(&vec![2, 2]));
         assert!(coords_r2.contains(&vec![4, 4]));
@@ -219,7 +268,7 @@ mod tests {
         let mut e = vec![1.0; 25];
         e[2 * 5 + 2] = 0.0;
         let arr = to_dyn([5, 5], e);
-        let mins = local_minima_inner(arr.view(), 2);
+        let mins = local_minima_inner(arr.view(), 2, None);
         assert_eq!(mins.len(), 1);
         assert_eq!(mins[0].0, vec![2, 2]);
         assert_eq!(mins[0].1, 0.0);
