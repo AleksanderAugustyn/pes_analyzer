@@ -11,7 +11,7 @@ Quantum-chemistry calculations produce potential energy surfaces (PES) as dense 
 ## What it does
 
 - **`pes_analyzer.saddle.find_iwf_grid`** — imaginary water flow (watershed) saddle search between two grid points.
-- **`pes_analyzer.minimum.find_minima_grid`** — local minima on the full 3ᴺ−1 (king-move) neighbourhood (cells with no strictly-lower neighbour).
+- **`pes_analyzer.minimum.find_minima_grid`** — local minima on the Chebyshev king-move stencil (default 3ᴺ−1; widen with `neighborhood_range`).
 - **`pes_analyzer.grid.build_dense`** — scatter helper that turns sparse `(coords, value)` rows into a dense `numpy` array indexed in axis order.
 
 ## Installation
@@ -54,7 +54,7 @@ print(find_iwf_grid(energies, start=(0, 0), end=(0, 4)))
 |---|---|---|
 | `grid.build_dense(coords, values)` | sparse rows → dense N-D array | [API.md](./API.md#build_dense) |
 | `saddle.find_iwf_grid(energies, start, end)` | watershed saddle search | [API.md](./API.md#find_iwf_grid) |
-| `minimum.find_minima_grid(energies)` | local minima (3ᴺ−1 stencil) | [API.md](./API.md#find_minima_grid) |
+| `minimum.find_minima_grid(energies, *, neighborhood_range=1)` | local minima (Chebyshev stencil) | [API.md](./API.md#find_minima_grid) |
 
 ## Documentation
 
