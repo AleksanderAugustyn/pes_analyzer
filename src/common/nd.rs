@@ -56,15 +56,23 @@ pub fn axis_neighbors(linear: usize, shape: &[usize], strides: &[usize], out: &m
 // ndim is bounded at 7 by the public API (enforced in validate.rs::check_ndim).
 const MAX_NDIM: usize = 7;
 
-/// Enumerate the up-to-3ᴺ−1 in-bounds neighbors of the cell at `linear`
-/// (the "king-move" / full diagonal stencil) and push their linear indices
-/// into `out`. The buffer `out` is cleared first.
+/// Enumerate the up-to-(2r+1)ᴺ−1 in-bounds neighbors of the cell at `linear`
+/// inside the Chebyshev box of half-width `r` (king-move stencil at `r = 1`)
+/// and push their linear indices into `out`. The buffer `out` is cleared first.
 ///
-/// Walks `[-1, 0, 1]ᴺ` minus the all-zero offset. Boundary cells produce
-/// fewer than 3ᴺ−1 neighbors.
-pub fn full_neighbors(linear: usize, shape: &[usize], strides: &[usize], out: &mut Vec<usize>) {
+/// Walks `[-r, r]ᴺ` minus the all-zero offset. Boundary cells produce
+/// fewer than (2r+1)ᴺ−1 neighbors. `r` must be ≥ 1; the PyO3 boundary
+/// enforces this.
+pub fn full_neighbors(
+    linear: usize,
+    shape: &[usize],
+    strides: &[usize],
+    r: usize,
+    out: &mut Vec<usize>,
+) {
     out.clear();
     let ndim = shape.len();
+    let r_i = r as i64;
 
     // Decompose `linear` into per-axis coordinates once.
     // Fixed-size stack array avoids heap allocation; only [0..ndim] is used.
@@ -75,9 +83,9 @@ pub fn full_neighbors(linear: usize, shape: &[usize], strides: &[usize], out: &m
         remaining %= strides[axis];
     }
 
-    // Walk all offsets in [-1, 0, 1]^N except the all-zero offset (self).
+    // Walk all offsets in [-r, r]^N except the all-zero offset (self).
     // Fixed-size stack array avoids heap allocation; only [0..ndim] is used.
-    let mut offset: [i64; MAX_NDIM] = [-1; MAX_NDIM];
+    let mut offset: [i64; MAX_NDIM] = [-r_i; MAX_NDIM];
     loop {
         // Skip the all-zero offset (self). Short-circuit on the first non-zero
         // entry (the common case), inspecting only the active [0..ndim] slice.
@@ -99,18 +107,18 @@ pub fn full_neighbors(linear: usize, shape: &[usize], strides: &[usize], out: &m
             }
         }
 
-        // Increment the offset vector odometer-style: -1 → 0 → 1 → carry.
+        // Increment the offset vector odometer-style: -r → ... → r → carry.
         let mut axis = ndim;
         loop {
             if axis == 0 {
                 return;
             }
             axis -= 1;
-            if offset[axis] < 1 {
+            if offset[axis] < r_i {
                 offset[axis] += 1;
                 break;
             }
-            offset[axis] = -1;
+            offset[axis] = -r_i;
         }
     }
 }
@@ -216,7 +224,7 @@ mod tests {
         let strides = compute_strides(&shape);
         let mut buf = Vec::new();
         // Interior cell (2, 2) → linear 12
-        full_neighbors(12, &shape, &strides, &mut buf);
+        full_neighbors(12, &shape, &strides, 1, &mut buf);
         assert_eq!(buf.len(), 8); // 3^2 - 1
     }
 
@@ -226,7 +234,7 @@ mod tests {
         let strides = compute_strides(&shape);
         let mut buf = Vec::new();
         // Corner (0, 0) → linear 0; neighbors are (0,1)=1, (1,0)=5, (1,1)=6
-        full_neighbors(0, &shape, &strides, &mut buf);
+        full_neighbors(0, &shape, &strides, 1, &mut buf);
         buf.sort();
         assert_eq!(buf, vec![1, 5, 6]);
     }
@@ -236,7 +244,7 @@ mod tests {
         let shape = [3, 3];
         let strides = compute_strides(&shape);
         let mut buf = vec![99, 99, 99];
-        full_neighbors(0, &shape, &strides, &mut buf);
+        full_neighbors(0, &shape, &strides, 1, &mut buf);
         buf.sort();
         // Corner (0,0): (0,1)=1, (1,0)=3, (1,1)=4
         assert_eq!(buf, vec![1, 3, 4]);
@@ -248,7 +256,7 @@ mod tests {
         let strides = compute_strides(&shape);
         let mut buf = Vec::new();
         let lin = index_to_linear(&[2, 2, 2, 2, 2], &strides);
-        full_neighbors(lin, &shape, &strides, &mut buf);
+        full_neighbors(lin, &shape, &strides, 1, &mut buf);
         assert_eq!(buf.len(), 3usize.pow(5) - 1); // 242
     }
 
@@ -258,7 +266,7 @@ mod tests {
         let strides = compute_strides(&shape);
         let mut buf = Vec::new();
         let lin = index_to_linear(&[1, 1, 1, 1, 1, 1, 1], &strides);
-        full_neighbors(lin, &shape, &strides, &mut buf);
+        full_neighbors(lin, &shape, &strides, 1, &mut buf);
         assert_eq!(buf.len(), 3usize.pow(7) - 1); // 2186
     }
 
@@ -269,8 +277,53 @@ mod tests {
         let strides = compute_strides(&shape);
         let mut buf = Vec::new();
         let lin = index_to_linear(&[1, 1, 1], &strides);
-        full_neighbors(lin, &shape, &strides, &mut buf);
+        full_neighbors(lin, &shape, &strides, 1, &mut buf);
         assert!(!buf.contains(&lin));
         assert_eq!(buf.len(), 26); // 3^3 - 1
+    }
+
+    #[test]
+    fn full_neighbors_r2_interior_2d_returns_24() {
+        // 7x7 grid, interior cell (3, 3); r=2 stencil has 5*5 - 1 = 24 neighbors.
+        let shape = [7, 7];
+        let strides = compute_strides(&shape);
+        let mut buf = Vec::new();
+        let lin = index_to_linear(&[3, 3], &strides);
+        full_neighbors(lin, &shape, &strides, 2, &mut buf);
+        assert_eq!(buf.len(), 24);
+    }
+
+    #[test]
+    fn full_neighbors_r2_interior_3d_returns_124() {
+        // 7x7x7 grid, interior cell (3, 3, 3); r=2 stencil has 5^3 - 1 = 124.
+        let shape = [7, 7, 7];
+        let strides = compute_strides(&shape);
+        let mut buf = Vec::new();
+        let lin = index_to_linear(&[3, 3, 3], &strides);
+        full_neighbors(lin, &shape, &strides, 2, &mut buf);
+        assert_eq!(buf.len(), 124);
+    }
+
+    #[test]
+    fn full_neighbors_r2_corner_clips_to_eight() {
+        // Corner (0, 0) in a 5x5 grid at r=2: in-bounds cells are
+        // [0..3, 0..3] minus self = 3*3 - 1 = 8.
+        let shape = [5, 5];
+        let strides = compute_strides(&shape);
+        let mut buf = Vec::new();
+        full_neighbors(0, &shape, &strides, 2, &mut buf);
+        assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn full_neighbors_r2_excludes_self() {
+        // Even with the offset domain including 0, self must not appear.
+        let shape = [5, 5, 5];
+        let strides = compute_strides(&shape);
+        let mut buf = Vec::new();
+        let lin = index_to_linear(&[2, 2, 2], &strides);
+        full_neighbors(lin, &shape, &strides, 2, &mut buf);
+        assert!(!buf.contains(&lin));
+        assert_eq!(buf.len(), 124); // 5^3 - 1
     }
 }

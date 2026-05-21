@@ -26,7 +26,7 @@ fn py_find_minima_grid<'py>(
     check_total_cells_fit_u32(arr.len())?;
 
     // Compute under released GIL.
-    let result = py.allow_threads(|| local_minima::local_minima_inner(arr));
+    let result = py.allow_threads(|| local_minima::local_minima_inner(arr, 1));
 
     // Build Python list of (tuple[int, ...], float).
     let list = PyList::empty_bound(py);
