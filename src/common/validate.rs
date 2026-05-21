@@ -47,12 +47,16 @@ pub fn check_total_cells_fit_u32(total: usize) -> PyResult<()> {
     Ok(())
 }
 
-pub fn check_neighborhood_range(r: usize) -> PyResult<()> {
-    if (1..=5).contains(&r) {
+/// Validate the `neighborhood_range` keyword argument of
+/// `find_minima_grid`. Accepts integers in `[1, 5]`: the Chebyshev
+/// half-width of the neighbor stencil. The upper bound is the safety
+/// cap on the `(2r+1)^N` neighbor count.
+pub fn check_neighborhood_range(neighborhood_range: usize) -> PyResult<()> {
+    if (1..=5).contains(&neighborhood_range) {
         Ok(())
     } else {
         Err(PyValueError::new_err(format!(
-            "neighborhood_range must be in [1, 5], got {r}"
+            "neighborhood_range must be in [1, 5], got {neighborhood_range}"
         )))
     }
 }
