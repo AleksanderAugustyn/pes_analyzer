@@ -12,6 +12,7 @@ def find_minima_grid(
     energies: npt.NDArray[np.float64],
     *,
     neighborhood_range: int = 1,
+    confirm_range: int | None = None,
 ) -> list[tuple[tuple[int, ...], float]]:
     """Find all local minima on a dense N-D energy grid using the Chebyshev
     box of half-width ``neighborhood_range`` (the ``(2r+1)^N − 1`` stencil).
@@ -21,6 +22,14 @@ def find_minima_grid(
 
     ``neighborhood_range`` must be in ``[1, 5]``; values outside raise
     ``ValueError``. The argument is keyword-only.
+
+    ``confirm_range`` (keyword-only, default ``None``) optionally runs a
+    second pass that re-checks each candidate against the ``confirm_range``-
+    wide stencil. When set, it must satisfy ``confirm_range ∈ [1, 5]`` and
+    ``confirm_range >= neighborhood_range``. The recommended idiom for
+    wide-stencil minima is ``neighborhood_range=1, confirm_range=R``: the
+    fast ``r = 1`` pass culls most cells before the expensive wide check.
+    The result is identical to ``neighborhood_range=R``.
 
     See ``API.md`` (``find_minima_grid``) for the full contract.
     """
