@@ -273,4 +273,99 @@ mod tests {
         assert_eq!(mins[0].0, vec![2, 2]);
         assert_eq!(mins[0].1, 0.0);
     }
+
+    #[test]
+    fn confirm_range_none_matches_direct_check() {
+        // The r2_excludes_minimum_with_far_diagonal_lower fixture:
+        // 5x5 with (2,2)=3, (4,4)=1, everything else 5.
+        let mut e = vec![5.0; 25];
+        e[2 * 5 + 2] = 3.0;
+        e[4 * 5 + 4] = 1.0;
+        let arr = to_dyn([5, 5], e);
+
+        // None must reproduce the legacy direct-check behavior at both r=1 and r=2.
+        let direct_r1 = local_minima_inner(arr.view(), 1, None);
+        let direct_r2 = local_minima_inner(arr.view(), 2, None);
+
+        let coords_r1: Vec<Vec<usize>> = direct_r1.iter().map(|(c, _)| c.clone()).collect();
+        assert!(coords_r1.contains(&vec![2, 2]));
+        assert!(coords_r1.contains(&vec![4, 4]));
+
+        let coords_r2: Vec<Vec<usize>> = direct_r2.iter().map(|(c, _)| c.clone()).collect();
+        assert!(!coords_r2.contains(&vec![2, 2]));
+        assert!(coords_r2.contains(&vec![4, 4]));
+    }
+
+    #[test]
+    fn confirm_range_equals_neighborhood_is_noop() {
+        let mut e = vec![5.0; 25];
+        e[2 * 5 + 2] = 3.0;
+        e[4 * 5 + 4] = 1.0;
+        let arr = to_dyn([5, 5], e);
+
+        let none = local_minima_inner(arr.view(), 2, None);
+        let same = local_minima_inner(arr.view(), 2, Some(2));
+        assert_eq!(none, same);
+    }
+
+    #[test]
+    fn find_1_confirm_2_matches_direct_2() {
+        // KEY CORRECTNESS EQUIVALENCE: find at r=1 + confirm at r=2 must
+        // equal direct check at r=2.
+        let mut e = vec![5.0; 25];
+        e[2 * 5 + 2] = 3.0;
+        e[4 * 5 + 4] = 1.0;
+        let arr = to_dyn([5, 5], e);
+
+        let two_pass = local_minima_inner(arr.view(), 1, Some(2));
+        let direct = local_minima_inner(arr.view(), 2, None);
+        assert_eq!(two_pass, direct);
+    }
+
+    #[test]
+    fn find_1_confirm_r_equivalence_sweep() {
+        // Deterministic 3D fixture: 4x4x4 grid with two planted minima
+        // and a gradient backdrop to avoid ties.
+        let shape = [4usize, 4, 4];
+        let total: usize = shape.iter().product();
+        let mut data: Vec<f64> = (0..total).map(|i| 10.0 + (i as f64) * 0.5).collect();
+        // Plant low values at two corners so multiple R-stencils interact.
+        data[0] = 1.0;
+        data[total - 1] = 0.5;
+        let arr = to_dyn(shape, data);
+
+        for r in 2usize..=5 {
+            let two_pass = local_minima_inner(arr.view(), 1, Some(r));
+            let direct = local_minima_inner(arr.view(), r, None);
+            assert_eq!(two_pass, direct, "mismatch at r={r}");
+        }
+    }
+
+    #[test]
+    fn confirm_culls_r1_candidates() {
+        // Fixture: 5x5 with three planted dips at (0,0)=2, (2,2)=3, (4,4)=1,
+        // everything else 5. At r=1 all three qualify (they each beat their
+        // king-move neighbors). At confirm r=2 the (2,2)=3 cell sees (4,4)=1
+        // and (0,0)=2 within its 5x5 stencil — both lower — so it is culled.
+        // (0,0)=2 sees (2,2)=3 (higher, ok) but NOT (4,4)=1 (Chebyshev 4 > 2),
+        // so it survives. (4,4)=1 sees (2,2)=3 (higher, ok), so it survives.
+        let mut e = vec![5.0; 25];
+        e[0] = 2.0;
+        e[2 * 5 + 2] = 3.0;
+        e[4 * 5 + 4] = 1.0;
+        let arr = to_dyn([5, 5], e);
+
+        let r1 = local_minima_inner(arr.view(), 1, None);
+        let coords_r1: Vec<Vec<usize>> = r1.iter().map(|(c, _)| c.clone()).collect();
+        assert!(coords_r1.contains(&vec![0, 0]));
+        assert!(coords_r1.contains(&vec![2, 2]));
+        assert!(coords_r1.contains(&vec![4, 4]));
+
+        let two_pass = local_minima_inner(arr.view(), 1, Some(2));
+        let coords_2p: Vec<Vec<usize>> = two_pass.iter().map(|(c, _)| c.clone()).collect();
+        assert!(coords_2p.contains(&vec![0, 0]));
+        assert!(!coords_2p.contains(&vec![2, 2]));
+        assert!(coords_2p.contains(&vec![4, 4]));
+        assert_eq!(coords_2p.len(), 2);
+    }
 }
