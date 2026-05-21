@@ -27,7 +27,7 @@ use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
 /// - `energies.ndim()` is in `[2, 7]`.
 /// - `energies.len() <= u32::MAX`.
 /// - `find_r >= 1` (validated upstream).
-/// - `confirm_r`, if `Some(R)`, satisfies `R in [1, 5]` and `R >= find_r`.
+/// - `confirm_r`, if `Some(R)`, satisfies `R in [1, 5]`; values `R <= find_r` are accepted but silently skipped (no-op).
 pub fn local_minima_inner(
     energies: ArrayViewD<'_, f64>,
     find_r: usize,
