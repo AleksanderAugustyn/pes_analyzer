@@ -165,3 +165,42 @@ def test_neighborhood_range_negative_raises():
     e = np.zeros((3, 3), dtype=np.float64)
     with pytest.raises(OverflowError):
         find_minima_grid(e, neighborhood_range=-1)
+
+
+def test_confirm_range_default_unchanged():
+    """Omitting confirm_range must produce the same result as before the parameter existed."""
+    e = np.full((5, 5), 5.0, dtype=np.float64)
+    e[2, 2] = 3.0
+    e[4, 4] = 1.0
+    baseline = find_minima_grid(e, neighborhood_range=1)
+    assert find_minima_grid(e) == baseline
+    assert find_minima_grid(e, neighborhood_range=1, confirm_range=None) == baseline
+
+
+def test_confirm_range_equivalent_to_wider_neighborhood():
+    """find at r=1 + confirm at r=2 must equal direct check at r=2."""
+    e = np.full((5, 5), 5.0, dtype=np.float64)
+    e[2, 2] = 3.0
+    e[4, 4] = 1.0
+    two_pass = find_minima_grid(e, neighborhood_range=1, confirm_range=2)
+    direct = find_minima_grid(e, neighborhood_range=2)
+    assert two_pass == direct
+
+
+def test_confirm_range_validation_errors():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match=r"confirm_range must be in \[1, 5\]"):
+        find_minima_grid(e, confirm_range=0)
+    with pytest.raises(ValueError, match=r"confirm_range must be in \[1, 5\]"):
+        find_minima_grid(e, confirm_range=6)
+    with pytest.raises(
+        ValueError,
+        match=r"confirm_range \(1\) must be >= neighborhood_range \(2\)",
+    ):
+        find_minima_grid(e, neighborhood_range=2, confirm_range=1)
+
+
+def test_confirm_range_must_be_keyword_only():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(TypeError):
+        find_minima_grid(e, 1, 2)  # type: ignore[misc]
