@@ -108,3 +108,60 @@ def test_diagonal_neighbor_disqualifies_minimum():
     coords = [idx for idx, _ in result]
     assert (1, 1) not in coords
     assert (0, 0) in coords
+
+
+def test_default_neighborhood_range_matches_r1_explicit():
+    """The default argument value (r=1) must be byte-identical to passing it explicitly."""
+    e = np.array(
+        [[5.0, 5.0, 5.0, 5.0, 5.0],
+         [5.0, 5.0, 5.0, 5.0, 5.0],
+         [5.0, 5.0, 3.0, 5.0, 5.0],
+         [5.0, 5.0, 5.0, 5.0, 5.0],
+         [5.0, 5.0, 5.0, 5.0, 1.0]],
+        dtype=np.float64,
+    )
+    assert find_minima_grid(e) == find_minima_grid(e, neighborhood_range=1)
+
+
+def test_neighborhood_range_2_disqualifies_far_diagonal_minimum():
+    """At r=2, a cell beaten by a Chebyshev-distance-2 diagonal is no longer a minimum.
+
+    The 5x5 grid has (2,2)=3 and (4,4)=1, everything else 5. At r=1 both
+    (2,2) and (4,4) are local minima; at r=2 only (4,4) survives because
+    (2,2) sees (4,4)=1 in its r=2 stencil.
+    """
+    e = np.full((5, 5), 5.0, dtype=np.float64)
+    e[2, 2] = 3.0
+    e[4, 4] = 1.0
+
+    coords_r1 = [idx for idx, _ in find_minima_grid(e, neighborhood_range=1)]
+    assert (2, 2) in coords_r1
+    assert (4, 4) in coords_r1
+
+    coords_r2 = [idx for idx, _ in find_minima_grid(e, neighborhood_range=2)]
+    assert (2, 2) not in coords_r2
+    assert (4, 4) in coords_r2
+
+
+def test_rejects_neighborhood_range_0():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match=r"neighborhood_range must be in \[1, 5\]"):
+        find_minima_grid(e, neighborhood_range=0)
+
+
+def test_rejects_neighborhood_range_6():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match=r"neighborhood_range must be in \[1, 5\]"):
+        find_minima_grid(e, neighborhood_range=6)
+
+
+def test_neighborhood_range_must_be_keyword_only():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(TypeError):
+        find_minima_grid(e, 2)  # type: ignore[misc]
+
+
+def test_neighborhood_range_negative_raises():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(OverflowError):
+        find_minima_grid(e, neighborhood_range=-1)
