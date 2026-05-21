@@ -1,5 +1,6 @@
-//! Local-minimum search on a dense N-D grid using the 3ᴺ−1 (king-move)
-//! neighborhood. A cell is a local minimum iff its energy is non-NaN, at
+//! Local-minimum search on a dense N-D grid using the Chebyshev box of
+//! half-width `r` ((2r+1)ᴺ−1 stencil; the classic king-move 3ᴺ−1 at
+//! `r = 1`). A cell is a local minimum iff its energy is non-NaN, at
 //! least one in-bounds neighbor is non-NaN, and no non-NaN neighbor is
 //! strictly less.
 
