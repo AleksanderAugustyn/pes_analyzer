@@ -61,6 +61,30 @@ pub fn check_neighborhood_range(neighborhood_range: usize) -> PyResult<()> {
     }
 }
 
+/// Validate `confirm_range`. Accepts `None` (no confirmation pass) or
+/// integers in `[1, 5]` that are `>= neighborhood_range`. The caller
+/// must have already validated `neighborhood_range` itself via
+/// `check_neighborhood_range`.
+pub fn check_confirm_range(
+    confirm_range: Option<usize>,
+    neighborhood_range: usize,
+) -> PyResult<()> {
+    let Some(c) = confirm_range else {
+        return Ok(());
+    };
+    if !(1..=5).contains(&c) {
+        return Err(PyValueError::new_err(format!(
+            "confirm_range must be in [1, 5], got {c}"
+        )));
+    }
+    if c < neighborhood_range {
+        return Err(PyValueError::new_err(format!(
+            "confirm_range ({c}) must be >= neighborhood_range ({neighborhood_range})"
+        )));
+    }
+    Ok(())
+}
+
 /// Convert a signed Python integer index tuple to `usize`, returning
 /// `IndexError` on negatives.
 pub fn coerce_signed_indices(raw: &[i64]) -> PyResult<Vec<usize>> {
@@ -137,5 +161,32 @@ mod tests {
         assert!(check_neighborhood_range(0).is_err());
         assert!(check_neighborhood_range(6).is_err());
         assert!(check_neighborhood_range(100).is_err());
+    }
+
+    #[test]
+    fn check_confirm_range_accepts_none_and_valid() {
+        assert!(check_confirm_range(None, 1).is_ok());
+        for c in 1..=5 {
+            for nr in 1..=c {
+                assert!(
+                    check_confirm_range(Some(c), nr).is_ok(),
+                    "c={c}, nr={nr}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn check_confirm_range_rejects_out_of_range() {
+        assert!(check_confirm_range(Some(0), 1).is_err());
+        assert!(check_confirm_range(Some(6), 1).is_err());
+        assert!(check_confirm_range(Some(100), 1).is_err());
+    }
+
+    #[test]
+    fn check_confirm_range_rejects_less_than_neighborhood() {
+        assert!(check_confirm_range(Some(1), 2).is_err());
+        assert!(check_confirm_range(Some(2), 3).is_err());
+        assert!(check_confirm_range(Some(4), 5).is_err());
     }
 }
