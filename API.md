@@ -131,6 +131,8 @@ from pes_analyzer.minimum import find_minima_grid
 
 def find_minima_grid(
     energies: numpy.ndarray[float64],
+    *,
+    neighborhood_range: int = 1,
 ) -> list[tuple[tuple[int, ...], float]]:
     ...
 ```
@@ -138,6 +140,7 @@ def find_minima_grid(
 ### Parameters
 
 - **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are skipped.
+- **`neighborhood_range`** *(keyword-only, default `1`)* — Chebyshev half-width `r` of the neighbor stencil. A cell is compared against every in-bounds neighbor with `max_axis |Δi| ≤ r` (the `(2r+1)ᴺ − 1` stencil). Must satisfy `1 ≤ r ≤ 5`. The default `r = 1` is the classic 3ᴺ−1 king-move stencil.
 
 ### Returns
 
@@ -145,11 +148,13 @@ def find_minima_grid(
 
 ### Raises
 
-- `ValueError` if `energies` is not C-contiguous or if `energies.ndim` is outside `[2, 7]`.
+- `ValueError` if `energies` is not C-contiguous, if `energies.ndim` is outside `[2, 7]`, or if `neighborhood_range` is outside `[1, 5]`.
+- `TypeError` if `neighborhood_range` is passed positionally or is not an `int`.
+- `OverflowError` if `neighborhood_range` is negative.
 
 ### What it does
 
-Returns every cell whose energy is **not strictly greater than any non-`NaN` neighbour** in the full 3ᴺ−1 (king-move) stencil. Equivalently: no neighbour has strictly lower energy. Ties are allowed; a cell with one or more equal-energy neighbours still qualifies as long as none is lower. See [`ALGORITHMS.md`](./ALGORITHMS.md#find_minima_grid) for the underlying algorithm.
+Returns every cell whose energy is **not strictly greater than any non-`NaN` neighbour** in the Chebyshev box of half-width `neighborhood_range`. Equivalently: no neighbour with `max_axis |Δi| ≤ neighborhood_range` has strictly lower energy. Ties are allowed; a cell with one or more equal-energy neighbours still qualifies as long as none is lower. With the default `neighborhood_range = 1` this is the full 3ᴺ−1 (king-move) stencil. See [`ALGORITHMS.md`](./ALGORITHMS.md#find_minima_grid) for the underlying algorithm.
 
 ### Example
 
@@ -167,6 +172,29 @@ print(find_minima_grid(energies))
 # [((1, 1), 0.0)]
 ```
 
+A larger `neighborhood_range` disqualifies cells beaten by farther neighbours. The example uses `NaN` walls so only the intentional dips qualify:
+
+```python
+import numpy as np
+from pes_analyzer.minimum import find_minima_grid
+
+energies = np.array([
+    [np.nan, np.nan, np.nan, np.nan, np.nan],
+    [np.nan,    5.0,    5.0,    5.0, np.nan],
+    [np.nan,    5.0,    3.0,    5.0, np.nan],
+    [np.nan,    5.0,    5.0,    5.0, np.nan],
+    [   1.0, np.nan, np.nan, np.nan, np.nan],
+], dtype=np.float64)
+
+print(find_minima_grid(energies, neighborhood_range=1))
+# [((4, 0), 1.0), ((2, 2), 3.0)]
+
+print(find_minima_grid(energies, neighborhood_range=2))
+# [((4, 0), 1.0)]
+```
+
+At `r = 1`, `(2, 2)` is a minimum because all eight king-move neighbours are `5.0`. At `r = 2`, the 5×5 stencil around `(2, 2)` reaches `(4, 0) = 1.0` — strictly lower — and `(2, 2)` is no longer reported.
+
 ### Notes and edge cases
 
 - **Plateaus are reported.** Every cell on a flat plateau that has no king-move neighbour with strictly lower energy qualifies. In a uniformly-flat region, every cell whose stencil contains no lower neighbour will appear in the output — including corner and edge cells of the plateau where the stencil happens to be entirely within the plateau. If you only want strictly-isolated minima, filter the output yourself.
@@ -183,3 +211,4 @@ print(find_minima_grid(energies))
 | `ValueError: ndim must be in [2, 7]` | wrong array shape | reshape or filter inactive axes |
 | `ValueError: index ... out of bounds for shape ...` | `start`/`end` outside the grid | check tuple length and values |
 | `ValueError: energy at \`start\` is NaN` | endpoint cell is masked | pick an endpoint inside the non-`NaN` region |
+| `ValueError: neighborhood_range must be in [1, 5]` | passed `0` or `> 5` | choose `neighborhood_range ∈ {1, 2, 3, 4, 5}` |
