@@ -22,7 +22,7 @@ Concise descriptions of the two compute kernels in `pes_analyzer`. Enough to deb
 
 ## `find_minima_grid`
 
-**Local minima on the 3ᴺ−1 stencil.** The predicate is *no king-move neighbour has strictly lower energy*. Ties are allowed by the strict-less-than test — a cell with one or more equal-energy neighbours qualifies as long as none is lower. A cell is reported iff it is non-`NaN`, has at least one non-`NaN` neighbour, and no non-`NaN` neighbour has a strictly smaller energy value.
+**Local minima on the Chebyshev box of half-width `r` (default `r = 1`).** The predicate is *no neighbour within Chebyshev distance `r` has strictly lower energy*. At `r = 1` the stencil is the classic king-move 3ᴺ−1; at general `r` it is `(2r+1)ᴺ−1` cells. Ties are allowed by the strict-less-than test — a cell with one or more equal-energy neighbours qualifies as long as none is lower. A cell is reported iff it is non-`NaN`, has at least one non-`NaN` neighbour in the stencil, and no non-`NaN` neighbour has a strictly smaller energy value.
 
 **Implementation** (see `src/minimum/local_minima.rs`):
 
@@ -31,10 +31,10 @@ Concise descriptions of the two compute kernels in `pes_analyzer`. Enough to deb
 3. If every non-`NaN` neighbour has energy ≥ the cell's own, emit `(nd_index, energy)`.
 4. Sort the output ascending by energy with `f64::total_cmp` for determinism.
 
-**Why king-move, not axis-only?** A cell that is below its axis neighbours but above a diagonal neighbour is not a minimum of the surface — water released there would slide off to the diagonally lower neighbour. The topological definition uses the full stencil.
+**Why a king-move (Chebyshev) stencil, not axis-only?** A cell that is below its axis neighbours but above a diagonal neighbour is not a minimum of the surface — water released there would slide off to the diagonally lower neighbour. The topological definition uses the full Chebyshev box. The `neighborhood_range` parameter widens the box when the user wants to be robust against coarse grid sampling that places real minima two or more cells apart.
 
 **Plateaus.** Because ties are allowed, every cell on a flat plateau where no neighbour in the stencil is strictly lower will be reported. In a uniformly-flat region this produces one entry per cell whose stencil happens to lie entirely within the plateau. Callers that want strictly-isolated minima must filter the output.
 
 **Boundary handling.** The stencil is clipped at the array edges (a corner cell in 2-D has 3 neighbours instead of 8). The predicate is unchanged.
 
-**Complexity.** O(M · 3ᴺ) over non-`NaN` cells. For N = 7 the factor is 3⁷ − 1 = 2186 neighbour checks per cell — non-trivial but still linear in grid size.
+**Complexity.** O(M · (2r+1)ᴺ) over non-`NaN` cells. For `r = 1`, `N = 7` the factor is 3⁷ − 1 = 2186 neighbour checks per cell. The factor grows fast with `r`: at `N = 7`, `r = 2` is already 78124, and `r = 5` is ≈ 1.95 × 10⁷. The validation cap `r ≤ 5` is the safety net.
