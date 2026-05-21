@@ -47,6 +47,16 @@ pub fn check_total_cells_fit_u32(total: usize) -> PyResult<()> {
     Ok(())
 }
 
+pub fn check_neighborhood_range(r: usize) -> PyResult<()> {
+    if (1..=5).contains(&r) {
+        Ok(())
+    } else {
+        Err(PyValueError::new_err(format!(
+            "neighborhood_range must be in [1, 5], got {r}"
+        )))
+    }
+}
+
 /// Convert a signed Python integer index tuple to `usize`, returning
 /// `IndexError` on negatives.
 pub fn coerce_signed_indices(raw: &[i64]) -> PyResult<Vec<usize>> {
@@ -109,5 +119,19 @@ mod tests {
         assert!(check_total_cells_fit_u32(1000).is_ok());
         assert!(check_total_cells_fit_u32(u32::MAX as usize).is_ok());
         assert!(check_total_cells_fit_u32(u32::MAX as usize + 1).is_err());
+    }
+
+    #[test]
+    fn check_neighborhood_range_accepts_1_through_5() {
+        for r in 1..=5 {
+            assert!(check_neighborhood_range(r).is_ok(), "r={r}");
+        }
+    }
+
+    #[test]
+    fn check_neighborhood_range_rejects_0_and_6() {
+        assert!(check_neighborhood_range(0).is_err());
+        assert!(check_neighborhood_range(6).is_err());
+        assert!(check_neighborhood_range(100).is_err());
     }
 }
