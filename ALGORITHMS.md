@@ -27,7 +27,7 @@ Concise descriptions of the two compute kernels in `pes_analyzer`. Enough to deb
 **Implementation** (see `src/minimum/local_minima.rs`):
 
 1. Iterate every non-`NaN` cell in row-major order.
-2. Walk its king-move neighbours via `common::nd::full_neighbors`.
+2. Walk its Chebyshev-box neighbours via `common::nd::full_neighbors`.
 3. If every non-`NaN` neighbour has energy ≥ the cell's own, emit `(nd_index, energy)`.
 4. Sort the output ascending by energy with `f64::total_cmp` for determinism.
 
