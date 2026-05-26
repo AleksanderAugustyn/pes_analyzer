@@ -1,26 +1,49 @@
-//! Local-minimum search on a dense N-D grid using the Chebyshev box of
+//! Local-extremum search on a dense N-D grid using the Chebyshev box of
 //! half-width `r` ((2r+1)ᴺ−1 stencil; the classic king-move 3ᴺ−1 at
-//! `r = 1`). A cell is a local minimum iff its energy is non-NaN, at
-//! least one in-bounds neighbor is non-NaN, and no non-NaN neighbor is
-//! strictly less.
+//! `r = 1`). The single-polarity entry points `local_minima_inner` and
+//! `local_maxima_inner` are thin wrappers around a shared generic kernel
+//! `local_extreme_inner<C>` parameterised by an `is_dominated` closure.
 
 use ndarray::ArrayViewD;
 
 use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
 
-/// Find all strict local minima in `energies` using the Chebyshev box of
-/// half-width `find_r` (i.e. the `(2*find_r+1)ᴺ−1` stencil; `find_r = 1`
-/// is the classic king-move 3ᴺ−1 connectivity).
+/// Sort direction for the finalised output of a single-polarity search.
+enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+/// Convert flat `(lin, energy)` pairs into `(nd_index, energy)` and sort
+/// them in the requested order. Ties broken by `f64::total_cmp` for
+/// determinism.
+fn finalize(
+    raw: Vec<(usize, f64)>,
+    shape: &[usize],
+    strides: &[usize],
+    order: SortOrder,
+) -> Vec<(Vec<usize>, f64)> {
+    let mut out: Vec<(Vec<usize>, f64)> = raw
+        .into_iter()
+        .map(|(lin, e)| (linear_to_index(lin, shape, strides), e))
+        .collect();
+    match order {
+        SortOrder::Ascending => out.sort_by(|a, b| a.1.total_cmp(&b.1)),
+        SortOrder::Descending => out.sort_by(|a, b| b.1.total_cmp(&a.1)),
+    }
+    out
+}
+
+/// Generic single-polarity local-extremum search.
 ///
-/// If `confirm_r` is `Some(R)` with `R > find_r`, each stage-1 candidate
-/// is re-checked against the wider `R`-stencil and only those that still
-/// have no strictly-lower non-NaN neighbour are kept. When `confirm_r`
-/// is `None` (or `Some(R)` with `R <= find_r`), the stage-2 pass is
-/// skipped — behaviour is identical to a direct check at `find_r`.
+/// `is_dominated(neighbour_energy, center_energy)` returns `true` when
+/// the neighbour disqualifies the centre. For minima pass `|ne, e| ne < e`;
+/// for maxima pass `|ne, e| ne > e`. The closure is `Copy` so it can be
+/// shared between the find stage and the confirm stage without re-borrowing;
+/// Rust monomorphises one specialised copy per concrete closure type.
 ///
-/// Returns a vector of `(nd_index, energy)` for every qualifying cell,
-/// sorted ascending by energy (ties broken by `f64::total_cmp` for
-/// determinism).
+/// Returns flat `(lin, energy)` candidates; the public wrappers expand
+/// `lin` to an nd-index and sort.
 ///
 /// Preconditions (enforced by the PyO3 wrapper before calling):
 /// - `energies` is a view over a C-contiguous f64 buffer.
@@ -28,19 +51,22 @@ use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
 /// - `energies.len() <= u32::MAX`.
 /// - `find_r >= 1` (validated upstream).
 /// - `confirm_r`, if `Some(R)`, satisfies `R in [1, 5]`; values `R <= find_r` are accepted but silently skipped (no-op).
-pub fn local_minima_inner(
+fn local_extreme_inner<C>(
     energies: ArrayViewD<'_, f64>,
     find_r: usize,
     confirm_r: Option<usize>,
-) -> Vec<(Vec<usize>, f64)> {
+    is_dominated: C,
+) -> Vec<(usize, f64)>
+where
+    C: Fn(f64, f64) -> bool + Copy,
+{
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
     let flat: &[f64] = energies
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
-    // Stage 1: find candidates at `find_r`. Keep `lin` so stage 2 can
-    // call `full_neighbors` without recomputing the nd-index.
+    // Stage 1: find candidates at `find_r`.
     let stencil_max = (2 * find_r + 1).saturating_pow(shape.len() as u32);
     let mut nbrs: Vec<usize> = Vec::with_capacity(stencil_max);
     let mut candidates: Vec<(usize, f64)> = Vec::new();
@@ -59,7 +85,7 @@ pub fn local_minima_inner(
                 continue;
             }
             has_valid_neighbor = true;
-            if ne < e {
+            if is_dominated(ne, e) {
                 beats_all = false;
                 break;
             }
@@ -73,7 +99,7 @@ pub fn local_minima_inner(
     // Stage 2: confirm against the wider `confirm_r` stencil if requested
     // AND strictly wider than `find_r`. The equal case is a no-op and
     // skipping it avoids redundant work.
-    let survivors: Vec<(usize, f64)> = match confirm_r {
+    match confirm_r {
         Some(r) if r > find_r => {
             let stencil_max_r = (2 * r + 1).saturating_pow(shape.len() as u32);
             let mut nbrs_r: Vec<usize> = Vec::with_capacity(stencil_max_r);
@@ -88,7 +114,7 @@ pub fn local_minima_inner(
                         continue;
                     }
                     has_valid_neighbor = true;
-                    if ne < e {
+                    if is_dominated(ne, e) {
                         beats_all = false;
                         break;
                     }
@@ -100,14 +126,21 @@ pub fn local_minima_inner(
             kept
         }
         _ => candidates,
-    };
+    }
+}
 
-    let mut out: Vec<(Vec<usize>, f64)> = survivors
-        .into_iter()
-        .map(|(lin, e)| (linear_to_index(lin, &shape, &strides), e))
-        .collect();
-    out.sort_by(|a, b| a.1.total_cmp(&b.1));
-    out
+/// Find all strict local minima in `energies` using the Chebyshev box of
+/// half-width `find_r`. See `local_extreme_inner` for parameter semantics.
+/// Output sorted ascending by energy; ties broken by `f64::total_cmp`.
+pub fn local_minima_inner(
+    energies: ArrayViewD<'_, f64>,
+    find_r: usize,
+    confirm_r: Option<usize>,
+) -> Vec<(Vec<usize>, f64)> {
+    let shape: Vec<usize> = energies.shape().to_vec();
+    let strides = compute_strides(&shape);
+    let raw = local_extreme_inner(energies, find_r, confirm_r, |ne, e| ne < e);
+    finalize(raw, &shape, &strides, SortOrder::Ascending)
 }
 
 #[cfg(test)]
