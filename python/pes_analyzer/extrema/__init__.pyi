@@ -34,3 +34,20 @@ def find_minima_grid(
     See ``API.md`` (``find_minima_grid``) for the full contract.
     """
     ...
+
+def find_maxima_grid(
+    energies: npt.NDArray[np.float64],
+    *,
+    neighborhood_range: int = 1,
+    confirm_range: int | None = None,
+) -> list[tuple[tuple[int, ...], float]]:
+    """Find all local maxima on a dense N-D energy grid using the Chebyshev
+    box of half-width ``neighborhood_range``. Strict dual of
+    ``find_minima_grid``: a cell qualifies when no neighbor in the stencil
+    has strictly *higher* energy (ties are allowed).
+
+    Same ``neighborhood_range`` and ``confirm_range`` semantics as
+    ``find_minima_grid`` — see its docstring for details. Output is sorted
+    descending by energy with ``f64::total_cmp`` reversed for determinism.
+    """
+    ...
