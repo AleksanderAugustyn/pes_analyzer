@@ -4,6 +4,8 @@
 *.so
 *.pyd
 *.parquet
+*.png
+*.csv
 __pycache__/
 *.egg-info/
 .venv/
