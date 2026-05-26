@@ -5,11 +5,11 @@ re-exports the user-facing submodules so callers can use the spec-defined
 import paths::
 
     from pes_analyzer.saddle  import find_iwf_grid
-    from pes_analyzer.minimum import find_minima_grid
+    from pes_analyzer.extrema import find_minima_grid, find_maxima_grid, find_extrema_grid
     from pes_analyzer.grid    import build_dense
 """
 
-from pes_analyzer._native import minimum, saddle  # noqa: F401
+from pes_analyzer._native import extrema, saddle  # noqa: F401
 from pes_analyzer import grid  # noqa: F401
 
-__all__ = ["minimum", "saddle", "grid"]
+__all__ = ["extrema", "saddle", "grid"]

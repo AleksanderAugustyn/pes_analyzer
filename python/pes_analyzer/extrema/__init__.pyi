@@ -1,8 +1,8 @@
-"""Type stubs for ``pes_analyzer.minimum``.
+"""Type stubs for ``pes_analyzer.extrema``.
 
 The submodule itself is registered at runtime by the Rust extension via
 ``sys.modules`` patching; this stub exists purely so static type checkers
-can resolve ``from pes_analyzer.minimum import find_minima_grid``.
+can resolve ``from pes_analyzer.extrema import find_minima_grid``.
 """
 
 import numpy as np

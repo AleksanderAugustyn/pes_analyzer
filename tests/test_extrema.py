@@ -1,4 +1,4 @@
-"""Integration tests for pes_analyzer.minimum.find_minima_grid.
+"""Integration tests for pes_analyzer.extrema.find_minima_grid.
 
 The cargo unit tests already cover the core algorithm; these tests
 verify the Python-facing contract (dtype, contiguity, ndim, error
@@ -9,7 +9,7 @@ implementation as a black box.
 import numpy as np
 import pytest
 
-from pes_analyzer.minimum import find_minima_grid
+from pes_analyzer.extrema import find_minima_grid
 
 
 def test_single_bowl_2d():

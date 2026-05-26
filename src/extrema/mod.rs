@@ -1,4 +1,4 @@
-//! `pes_analyzer.minimum` submodule: local-minimum search algorithms.
+//! `pes_analyzer.extrema` submodule: local-minimum search algorithms.
 
 pub mod local_minima;
 
@@ -49,17 +49,17 @@ fn py_find_minima_grid<'py>(
     Ok(list.unbind())
 }
 
-/// Register the `minimum` submodule on `parent`. Also inserts the submodule
-/// into `sys.modules` under the dotted name `pes_analyzer.minimum` so that
-/// `from pes_analyzer.minimum import find_minima_grid` works at runtime.
+/// Register the `extrema` submodule on `parent`. Also inserts the submodule
+/// into `sys.modules` under the dotted name `pes_analyzer.extrema` so that
+/// `from pes_analyzer.extrema import find_minima_grid` works at runtime.
 pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
-    let m = PyModule::new_bound(py, "minimum")?;
+    let m = PyModule::new_bound(py, "extrema")?;
     m.add_function(wrap_pyfunction!(py_find_minima_grid, &m)?)?;
     parent.add_submodule(&m)?;
 
     let sys = py.import_bound("sys")?;
     let modules = sys.getattr("modules")?;
-    modules.set_item("pes_analyzer.minimum", &m)?;
+    modules.set_item("pes_analyzer.extrema", &m)?;
     Ok(())
 }

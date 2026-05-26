@@ -13,12 +13,12 @@
 use pyo3::prelude::*;
 
 mod common;
-mod minimum;
+mod extrema;
 mod saddle;
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    minimum::register(m)?;
+    extrema::register(m)?;
     saddle::register(m)?;
     Ok(())
 }
