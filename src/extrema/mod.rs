@@ -1,5 +1,6 @@
 //! `pes_analyzer.extrema` submodule: local-extremum search algorithms.
 
+pub mod local_extrema;
 pub mod local_minima;
 
 use numpy::{PyReadonlyArrayDyn, PyUntypedArrayMethods};
