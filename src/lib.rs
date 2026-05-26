@@ -15,10 +15,12 @@ use pyo3::prelude::*;
 mod common;
 mod extrema;
 mod saddle;
+mod topology;
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     extrema::register(m)?;
     saddle::register(m)?;
+    topology::register(m)?;
     Ok(())
 }
