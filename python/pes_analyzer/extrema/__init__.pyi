@@ -51,3 +51,27 @@ def find_maxima_grid(
     descending by energy with ``f64::total_cmp`` reversed for determinism.
     """
     ...
+
+def find_extrema_grid(
+    energies: npt.NDArray[np.float64],
+    *,
+    neighborhood_range: int = 1,
+    confirm_range: int | None = None,
+) -> tuple[
+    list[tuple[tuple[int, ...], float]],
+    list[tuple[tuple[int, ...], float]],
+]:
+    """Find all local minima and local maxima on a dense N-D energy grid
+    in a single sweep. Returns ``(minima, maxima)`` where each list has the
+    same shape as ``find_minima_grid`` / ``find_maxima_grid`` would produce
+    when called individually. Minima are sorted ascending, maxima
+    descending.
+
+    Result is byte-identical to ``(find_minima_grid(arr, **k),
+    find_maxima_grid(arr, **k))`` — the optimisation is purely a
+    constant-factor saving (one stencil walk per cell instead of two).
+
+    ``neighborhood_range`` and ``confirm_range`` semantics are identical to
+    ``find_minima_grid``.
+    """
+    ...
