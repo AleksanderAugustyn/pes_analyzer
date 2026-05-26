@@ -9,7 +9,7 @@ implementation as a black box.
 import numpy as np
 import pytest
 
-from pes_analyzer.extrema import find_minima_grid
+from pes_analyzer.extrema import find_minima_grid, find_maxima_grid
 
 
 def test_single_bowl_2d():
@@ -204,3 +204,156 @@ def test_confirm_range_must_be_keyword_only():
     e = np.zeros((3, 3), dtype=np.float64)
     with pytest.raises(TypeError):
         find_minima_grid(e, 1, 2)  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# find_maxima_grid
+# ---------------------------------------------------------------------------
+
+
+def test_maxima_single_peak_2d():
+    e = np.array(
+        [[0.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0],
+         [0.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    result = find_maxima_grid(e)
+    assert result == [((1, 1), 1.0)]
+
+
+def test_maxima_two_peaks_separated_by_nan_wall():
+    nan = np.nan
+    e = np.array(
+        [[5.0, 4.0, nan, 4.0, 5.0],
+         [4.0, 3.0, nan, 3.0, 4.0],
+         [4.0, 4.0, nan, 4.0, 4.0]],
+        dtype=np.float64,
+    )
+    result = find_maxima_grid(e)
+    coords = [idx for idx, _ in result]
+    assert (0, 0) in coords
+    assert (0, 4) in coords
+
+
+def test_maxima_output_is_sorted_descending_by_energy():
+    e = np.full((5, 5), -10.0, dtype=np.float64)
+    e[0, 0] = -2.0
+    e[4, 4] = -1.0
+    result = find_maxima_grid(e)
+    energies = [en for _, en in result]
+    assert energies == sorted(energies, reverse=True)
+
+
+def test_maxima_result_indices_are_int_tuples_not_numpy_scalars():
+    e = np.array(
+        [[0.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0],
+         [0.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    [(idx, _)] = find_maxima_grid(e)
+    assert isinstance(idx, tuple)
+    for component in idx:
+        assert isinstance(component, int)
+        assert not isinstance(component, np.integer)
+
+
+def test_maxima_5d_at_center():
+    shape = (3, 3, 3, 3, 3)
+    e = np.full(shape, 0.0, dtype=np.float64)
+    e[1, 1, 1, 1, 1] = 1.0
+    result = find_maxima_grid(e)
+    assert result == [((1, 1, 1, 1, 1), 1.0)]
+
+
+def test_maxima_rejects_ndim_1():
+    e = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    with pytest.raises(ValueError, match=r"ndim must be in \[2, 7\]"):
+        find_maxima_grid(e)
+
+
+def test_maxima_rejects_ndim_8():
+    e = np.zeros((2,) * 8, dtype=np.float64)
+    with pytest.raises(ValueError, match=r"ndim must be in \[2, 7\]"):
+        find_maxima_grid(e)
+
+
+def test_maxima_rejects_non_contiguous():
+    e = np.zeros((5, 5), dtype=np.float64)
+    sliced = e[::2, :]
+    with pytest.raises(ValueError, match="C-contiguous"):
+        find_maxima_grid(sliced)
+
+
+def test_maxima_rejects_non_float64():
+    e = np.zeros((3, 3), dtype=np.float32)
+    with pytest.raises(TypeError):
+        find_maxima_grid(e)
+
+
+def test_maxima_diagonal_neighbor_disqualifies_maximum():
+    e = np.array(
+        [[10.0, 0.0, 0.0],
+         [0.0, 5.0, 0.0],
+         [0.0, 0.0, 0.0]],
+        dtype=np.float64,
+    )
+    result = find_maxima_grid(e)
+    coords = [idx for idx, _ in result]
+    assert (1, 1) not in coords
+    assert (0, 0) in coords
+
+
+def test_maxima_neighborhood_range_2_disqualifies_far_diagonal_maximum():
+    e = np.full((5, 5), -5.0, dtype=np.float64)
+    e[2, 2] = -3.0
+    e[4, 4] = -1.0
+
+    coords_r1 = [idx for idx, _ in find_maxima_grid(e, neighborhood_range=1)]
+    assert (2, 2) in coords_r1
+    assert (4, 4) in coords_r1
+
+    coords_r2 = [idx for idx, _ in find_maxima_grid(e, neighborhood_range=2)]
+    assert (2, 2) not in coords_r2
+    assert (4, 4) in coords_r2
+
+
+def test_maxima_rejects_neighborhood_range_0():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match=r"neighborhood_range must be in \[1, 5\]"):
+        find_maxima_grid(e, neighborhood_range=0)
+
+
+def test_maxima_rejects_neighborhood_range_6():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match=r"neighborhood_range must be in \[1, 5\]"):
+        find_maxima_grid(e, neighborhood_range=6)
+
+
+def test_maxima_neighborhood_range_must_be_keyword_only():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(TypeError):
+        find_maxima_grid(e, 2)  # type: ignore[misc]
+
+
+def test_maxima_confirm_range_equivalent_to_wider_neighborhood():
+    e = np.full((5, 5), -5.0, dtype=np.float64)
+    e[2, 2] = -3.0
+    e[4, 4] = -1.0
+    two_pass = find_maxima_grid(e, neighborhood_range=1, confirm_range=2)
+    direct = find_maxima_grid(e, neighborhood_range=2)
+    assert two_pass == direct
+
+
+def test_maxima_confirm_range_validation_errors():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match=r"confirm_range must be in \[1, 5\]"):
+        find_maxima_grid(e, confirm_range=0)
+    with pytest.raises(ValueError, match=r"confirm_range must be in \[1, 5\]"):
+        find_maxima_grid(e, confirm_range=6)
+    with pytest.raises(
+        ValueError,
+        match=r"confirm_range \(1\) must be >= neighborhood_range \(2\)",
+    ):
+        find_maxima_grid(e, neighborhood_range=2, confirm_range=1)
