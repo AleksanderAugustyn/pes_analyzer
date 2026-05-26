@@ -9,7 +9,7 @@ implementation as a black box.
 import numpy as np
 import pytest
 
-from pes_analyzer.extrema import find_minima_grid, find_maxima_grid
+from pes_analyzer.extrema import find_minima_grid, find_maxima_grid, find_extrema_grid
 
 
 def test_single_bowl_2d():
@@ -357,3 +357,108 @@ def test_maxima_confirm_range_validation_errors():
         match=r"confirm_range \(1\) must be >= neighborhood_range \(2\)",
     ):
         find_maxima_grid(e, neighborhood_range=2, confirm_range=1)
+
+
+# ---------------------------------------------------------------------------
+# find_extrema_grid
+# ---------------------------------------------------------------------------
+
+
+def test_extrema_returns_tuple_of_two_lists():
+    e = np.array(
+        [[0.0, 1.0, 0.0],
+         [1.0, 0.5, 1.0],
+         [0.0, 1.0, 0.0]],
+        dtype=np.float64,
+    )
+    result = find_extrema_grid(e)
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    mins, maxs = result
+    assert isinstance(mins, list)
+    assert isinstance(maxs, list)
+
+
+def test_extrema_equivalent_to_separate_calls_simple():
+    e = np.array(
+        [[1.0, 2.0, 1.0],
+         [2.0, 0.0, 2.0],
+         [1.0, 2.0, 1.0]],
+        dtype=np.float64,
+    )
+    combined = find_extrema_grid(e)
+    separate = (find_minima_grid(e), find_maxima_grid(e))
+    assert combined == separate
+
+
+def test_extrema_equivalent_to_separate_calls_with_nan_walls():
+    nan = np.nan
+    e = np.array(
+        [[5.0, 5.0, 5.0, 5.0, 5.0],
+         [5.0, 3.0, nan, 1.0, 5.0],
+         [5.0, 5.0, nan, 5.0, 5.0],
+         [5.0, 5.0, nan, 5.0, 5.0],
+         [5.0, 5.0, 5.0, 5.0, 5.0]],
+        dtype=np.float64,
+    )
+    for r in (1, 2, 3):
+        for c in (None, 2, 3, 4):
+            if c is not None and c < r:
+                continue
+            combined = find_extrema_grid(e, neighborhood_range=r, confirm_range=c)
+            separate = (
+                find_minima_grid(e, neighborhood_range=r, confirm_range=c),
+                find_maxima_grid(e, neighborhood_range=r, confirm_range=c),
+            )
+            assert combined == separate, f"mismatch at r={r}, c={c}"
+
+
+def test_extrema_minima_ascending_maxima_descending():
+    e = np.array(
+        [[1.0, 5.0, 1.0, 6.0, 1.0],
+         [5.0, 0.0, 4.0, 0.5, 5.0],
+         [1.0, 5.0, 1.0, 5.0, 1.0]],
+        dtype=np.float64,
+    )
+    mins, maxs = find_extrema_grid(e)
+    min_energies = [en for _, en in mins]
+    max_energies = [en for _, en in maxs]
+    assert min_energies == sorted(min_energies)
+    assert max_energies == sorted(max_energies, reverse=True)
+
+
+def test_extrema_all_nan_stencil_disqualifies_both():
+    nan = np.nan
+    e = np.array(
+        [[nan, nan, nan],
+         [nan, 0.0, nan],
+         [nan, nan, nan]],
+        dtype=np.float64,
+    )
+    mins, maxs = find_extrema_grid(e)
+    assert mins == []
+    assert maxs == []
+
+
+def test_extrema_rejects_non_contiguous():
+    e = np.zeros((5, 5), dtype=np.float64)
+    sliced = e[::2, :]
+    with pytest.raises(ValueError, match="C-contiguous"):
+        find_extrema_grid(sliced)
+
+
+def test_extrema_rejects_ndim_1():
+    e = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    with pytest.raises(ValueError, match=r"ndim must be in \[2, 7\]"):
+        find_extrema_grid(e)
+
+
+def test_extrema_confirm_range_validation_errors():
+    e = np.zeros((3, 3), dtype=np.float64)
+    with pytest.raises(ValueError, match=r"confirm_range must be in \[1, 5\]"):
+        find_extrema_grid(e, confirm_range=0)
+    with pytest.raises(
+        ValueError,
+        match=r"confirm_range \(1\) must be >= neighborhood_range \(2\)",
+    ):
+        find_extrema_grid(e, neighborhood_range=2, confirm_range=1)
