@@ -51,9 +51,11 @@ import polars as pl
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
 
-from pes_analyzer.saddle  import find_iwf_grid
-from pes_analyzer.extrema import find_minima_grid
-from pes_analyzer.grid    import build_dense
+from pes_analyzer.grid     import build_dense
+from pes_analyzer.topology import (
+    find_watershed_segmentation,
+    identify_critical_points,
+)
 
 # =============================================================================
 # CONFIGURATION
@@ -93,20 +95,10 @@ PARAMETER_LIMITS = {
 # ANALYSIS THRESHOLDS
 # =============================================================================
 GROUND_STATE_C_THRESHOLD = 1.25
-SECONDARY_MINIMUM_C_MAX_THRESHOLD = 1.45
-SECONDARY_MINIMUM_A3_MAX_THRESHOLD = 0.10
-SECONDARY_MINIMUM_A4_MAX_THRESHOLD = 0.20
 
-# When True (default), run the full GS / SM / Inner Saddle / Outer Saddle / FE
-# pipeline. When False, skip the secondary minimum and outer saddle searches
-# entirely and report a single saddle between GS and FE. Use False for SHE
-# where there is no genuine fission isomer and the SM search picks up noise.
-SECOND_MINIMUM_SEARCH = False
-
-# Lower-c offset used by the Fission Exit search when SECOND_MINIMUM_SEARCH=False.
-# In that mode there is no secondary minimum to anchor to, so FE is the global
-# minimum over cells with c > gs.c + FISSION_EXIT_GS_C_OFFSET.
-FISSION_EXIT_GS_C_OFFSET = 0.2
+# Persistence threshold for basin survival in the merge-tree pruning step.
+# Single tunable knob for the GS / SM / FE classification.
+PERSISTENCE_THRESHOLD = 0.5    # MeV
 
 
 # =============================================================================
@@ -572,128 +564,6 @@ def index_to_gridpoint(
     )
 
 
-def find_ground_state_nd(
-    all_minima: list[tuple[tuple[int, ...], float]],
-    axes: dict[str, np.ndarray],
-    energies: np.ndarray,
-    c_threshold: float,
-) -> tuple[tuple[int, ...] | None, float]:
-    """Pick the ground-state cell from sorted local minima.
-
-    Tries the global energy minimum across all cells (not just minima)
-    first; if it satisfies c <= c_threshold, returns it. Otherwise falls
-    back to the lowest local minimum with c <= c_threshold.
-
-    Matches the 5D pipeline semantics (which match the C++ reference).
-
-    Returns
-    -------
-    (idx, energy) - idx is None if no candidate satisfies the threshold.
-    """
-    if np.all(np.isnan(energies)):
-        return None, float('nan')
-    flat_argmin = int(np.nanargmin(energies))
-    global_idx = np.unravel_index(flat_argmin, energies.shape)
-    global_c = float(axes['c'][global_idx[list(axes).index('c')]])
-    global_e = float(energies[global_idx])
-    if global_c <= c_threshold:
-        return tuple(int(i) for i in global_idx), global_e
-
-    c_axis_pos = list(axes).index('c')
-    for idx, energy in all_minima:
-        c_val = float(axes['c'][idx[c_axis_pos]])
-        if c_val <= c_threshold:
-            return tuple(int(i) for i in idx), energy
-    return None, float('nan')
-
-
-def find_secondary_minimum_nd(
-    all_minima: list[tuple[tuple[int, ...], float]],
-    axes: dict[str, np.ndarray],
-    gs_idx: tuple[int, ...] | None,
-    *,
-    c_max: float,
-    a3_max: float,
-    a4_max: float,
-) -> tuple[tuple[int, ...] | None, float]:
-    """Pick the secondary minimum from sorted local minima.
-
-    Conditions (any condition referencing an inactive axis is silently
-    skipped):
-      - c > gs.c (always)
-      - c > gs.c + 0.1 OR a4 > gs.a4 + 0.1
-      - c <= c_max
-      - a3 <= a3_max
-      - a4 <= a4_max
-
-    Returns the first match (i.e. the lowest-energy match since
-    `all_minima` is sorted ascending), or (None, NaN).
-    """
-    if gs_idx is None:
-        return None, float('nan')
-
-    axes_list = list(axes)
-
-    def coord(idx: tuple[int, ...], name: str) -> float | None:
-        if name not in axes:
-            return None
-        return float(axes[name][idx[axes_list.index(name)]])
-
-    gs_c  = coord(gs_idx, 'c')
-    gs_a4 = coord(gs_idx, 'a4')
-
-    for idx, energy in all_minima:
-        c  = coord(idx, 'c')
-        a3 = coord(idx, 'a3')
-        a4 = coord(idx, 'a4')
-
-        if c is None or c <= gs_c:
-            continue
-        c_far  = c > gs_c + 0.1
-        a4_far = (a4 is not None and gs_a4 is not None and a4 > gs_a4 + 0.1)
-        if not (c_far or a4_far):
-            continue
-        if c > c_max:
-            continue
-        if a3 is not None and a3 > a3_max:
-            continue
-        if a4 is not None and a4 > a4_max:
-            continue
-        return tuple(int(i) for i in idx), energy
-    return None, float('nan')
-
-
-def find_fission_exit_nd(
-    energies: np.ndarray,
-    axes: dict[str, np.ndarray],
-    c_threshold: float,
-) -> tuple[tuple[int, ...] | None, float]:
-    """Global minimum (not necessarily local) of `energies` over cells
-    with c > c_threshold. Caller supplies the threshold (typically
-    sm.c + 0.05 when a secondary minimum is found, or gs.c + offset
-    when running without the SM search).
-    """
-    if not np.isfinite(c_threshold):
-        return None, float('nan')
-
-    c_pos = list(axes).index('c')
-    c_threshold_idx = int(np.searchsorted(axes['c'], c_threshold, side='right'))
-
-    if c_threshold_idx >= energies.shape[c_pos]:
-        return None, float('nan')
-
-    slicer = [slice(None)] * energies.ndim
-    slicer[c_pos] = slice(c_threshold_idx, None)
-    sub = energies[tuple(slicer)]
-    if np.all(np.isnan(sub)):
-        return None, float('nan')
-    flat_argmin = int(np.nanargmin(sub))
-    sub_idx = np.unravel_index(flat_argmin, sub.shape)
-    full_idx = list(sub_idx)
-    full_idx[c_pos] += c_threshold_idx
-    return tuple(int(i) for i in full_idx), float(energies[tuple(full_idx)])
-
-
 def run_critical_point_analysis_nd(
     df: pl.DataFrame,
     out: TextIO = sys.stdout,
@@ -728,134 +598,71 @@ def run_critical_point_analysis_nd(
           f"non-NaN cells: {int(np.count_nonzero(~np.isnan(energies))):,}", file=out)
     print(f"  [time] Step 0 (build grid): {time.perf_counter() - t0:.2f} s", file=out)
 
-    print("\n  Step 1: Finding all local minima", file=out)
-    print("    Criterion: a cell is a strict local minimum iff its energy is non-NaN,", file=out)
-    print("               at least one in-bounds neighbor (3^N - 1 king-move neighborhood)", file=out)
-    print("               is non-NaN, and no non-NaN neighbor is strictly smaller.", file=out)
+    print("\n  Step 1: Watershed segmentation", file=out)
     t0 = time.perf_counter()
-    all_minima = find_minima_grid(energies, confirm_range=2)
-    print(f"    Found {len(all_minima)} local minima (sorted ascending by energy):", file=out)
-    width = max(2, len(str(len(all_minima))))
-    for i, (idx, energy) in enumerate(all_minima, start=1):
-        idx_t = tuple(int(j) for j in idx)
-        print(f"      [{i:>{width}}] idx={idx_t} coords={_format_coords(idx_t, axes)}"
-              f"  E = {float(energy):.4f} MeV", file=out)
-    print(f"  [time] Step 1 (local minima): {time.perf_counter() - t0:.2f} s", file=out)
+    labels, basins, merges = find_watershed_segmentation(energies)
+    print(f"    Basins found: {len(basins)}; merge events: {len(merges)}", file=out)
+    print(f"  [time] Step 1 (watershed): {time.perf_counter() - t0:.2f} s", file=out)
 
-    print("\n  Step 2: Selecting Ground State", file=out)
-    print(f"    Criterion: global energy minimum across all cells, accepted if c <= {GROUND_STATE_C_THRESHOLD}.", file=out)
-    print(f"               Otherwise, the lowest-energy local minimum with c <= {GROUND_STATE_C_THRESHOLD}.", file=out)
-    gs_idx, gs_e = find_ground_state_nd(
-        all_minima, axes, energies,
-        c_threshold=GROUND_STATE_C_THRESHOLD,
+    print("\n  Step 2: Persistence-pruned critical-point identification", file=out)
+    print(f"    Persistence threshold: {PERSISTENCE_THRESHOLD} MeV", file=out)
+    print(f"    Ground-state c constraint: c <= {GROUND_STATE_C_THRESHOLD}", file=out)
+    t0 = time.perf_counter()
+
+    c_pos = list(axes).index('c')
+
+    def gs_disqualifier(bid: int) -> bool:
+        bmin_nd_idx = basins[bid][0]
+        return float(axes['c'][bmin_nd_idx[c_pos]]) > GROUND_STATE_C_THRESHOLD
+
+    cp = identify_critical_points(
+        basins, merges, PERSISTENCE_THRESHOLD,
+        gs_disqualifier=gs_disqualifier,
     )
+    print(f"  [time] Step 2 (identification): {time.perf_counter() - t0:.2f} s", file=out)
+
+    def _basin_gp(bid):
+        if bid is None:
+            return None, float('nan')
+        return basins[bid][0], basins[bid][1]
+
+    def _saddle_gp(m):
+        if m is None:
+            return None, float('nan')
+        return m[0], m[1]
+
+    gs_idx,    gs_e    = _basin_gp (cp["ground_state"])
+    sm_idx,    sm_e    = _basin_gp (cp["secondary_minimum"])
+    fe_idx,    fe_e    = _basin_gp (cp["fission_exit"])
+    inner_idx, inner_e = _saddle_gp(cp["inner_saddle"])
+    outer_idx, outer_e = _saddle_gp(cp["outer_saddle"])
+
     if gs_idx is not None:
-        print(f"    ✓ Ground State at idx={gs_idx} {_format_coords(gs_idx, axes)},"
-              f" E = {gs_e:.4f} MeV", file=out)
+        print(f"    ✓ Ground State     at idx={gs_idx} {_format_coords(gs_idx, axes)}, E = {gs_e:.4f} MeV", file=out)
     else:
         print("    ✗ Ground State not found.", file=out)
 
-    def _saddle(start_idx, end_idx, name):
-        if start_idx is None or end_idx is None:
-            return None, float('nan')
-        if np.isnan(energies[start_idx]) or np.isnan(energies[end_idx]):
-            return None, float('nan')
-        result = find_iwf_grid(energies, start_idx, end_idx)
-        if result is None:
-            return None, float('nan')
-        s_idx, s_e = result
-        s_idx = tuple(int(i) for i in s_idx)
-        print(f"    ✓ {name} at idx={s_idx} {_format_coords(s_idx, axes)},"
-              f" E = {s_e:.4f} MeV", file=out)
-        return s_idx, float(s_e)
-
-    c_axis_pos = list(axes).index('c')
-
-    if SECOND_MINIMUM_SEARCH:
-        print("\n  Step 3: Selecting Secondary Minimum", file=out)
-        print("    Criterion: lowest-energy local minimum with:", file=out)
-        print("      - c  > ground_state.c  (always)", file=out)
-        print("      - c  > ground_state.c + 0.1  OR  a4 > ground_state.a4 + 0.1", file=out)
-        print(f"      - c  <= {SECONDARY_MINIMUM_C_MAX_THRESHOLD}", file=out)
-        print(f"      - a3 <= {SECONDARY_MINIMUM_A3_MAX_THRESHOLD}  (skipped if a3 inactive)", file=out)
-        print(f"      - a4 <= {SECONDARY_MINIMUM_A4_MAX_THRESHOLD}  (skipped if a4 inactive)", file=out)
-        sm_idx, sm_e = find_secondary_minimum_nd(
-            all_minima, axes, gs_idx,
-            c_max =SECONDARY_MINIMUM_C_MAX_THRESHOLD,
-            a3_max=SECONDARY_MINIMUM_A3_MAX_THRESHOLD,
-            a4_max=SECONDARY_MINIMUM_A4_MAX_THRESHOLD,
-        )
-        if sm_idx is not None:
-            print(f"    ✓ Secondary Minimum at idx={sm_idx} {_format_coords(sm_idx, axes)},"
-                  f" E = {sm_e:.4f} MeV", file=out)
-        else:
-            print("    ✗ Secondary Minimum not found.", file=out)
-
-        print("\n  Step 4: Selecting Fission Exit", file=out)
-        print("    Criterion: global energy minimum over all cells with c > secondary_minimum.c + 0.05.", file=out)
-        if sm_idx is not None:
-            fe_threshold = float(axes['c'][sm_idx[c_axis_pos]]) + 0.05
-        else:
-            fe_threshold = float('nan')
-        fe_idx, fe_e = find_fission_exit_nd(energies, axes, fe_threshold)
-        if fe_idx is not None:
-            print(f"    ✓ Fission Exit at idx={fe_idx} {_format_coords(fe_idx, axes)},"
-                  f" E = {fe_e:.4f} MeV", file=out)
-        else:
-            print("    ✗ Fission Exit not found.", file=out)
-
-        print("\n  Step 5: Inner Saddle", file=out)
-        print("    Criterion: lowest barrier on the optimal path from Ground State to Secondary", file=out)
-        print("               Minimum, found by the Iterative Watershed/Flooding algorithm", file=out)
-        print("               (pes_analyzer.saddle.find_iwf_grid).", file=out)
-        t0 = time.perf_counter()
-        inner_idx, inner_e = _saddle(gs_idx, sm_idx, "Inner Saddle")
-        print(f"  [time] Step 5 (inner saddle): {time.perf_counter() - t0:.2f} s", file=out)
-
-        print("\n  Step 6: Outer Saddle", file=out)
-        print("    Criterion: lowest barrier on the optimal path from Secondary Minimum to", file=out)
-        print("               Fission Exit, found by the same IWF algorithm.", file=out)
-        t0 = time.perf_counter()
-        outer_idx, outer_e = _saddle(sm_idx, fe_idx, "Outer Saddle")
-        print(f"  [time] Step 6 (outer saddle): {time.perf_counter() - t0:.2f} s", file=out)
+    if sm_idx is not None:
+        print(f"    ✓ Secondary Minimum at idx={sm_idx} {_format_coords(sm_idx, axes)}, E = {sm_e:.4f} MeV", file=out)
     else:
-        print("\n  Step 3: Secondary Minimum search DISABLED by SECOND_MINIMUM_SEARCH=False.", file=out)
-        print("    Running the simplified GS -> Saddle -> FE topology suitable for SHE", file=out)
-        print("    where no genuine fission isomer exists.", file=out)
-        sm_idx, sm_e = None, float('nan')
+        print("    - Secondary Minimum: none surviving persistence threshold.", file=out)
 
-        print("\n  Step 4: Selecting Fission Exit", file=out)
-        print(f"    Criterion: global energy minimum over all cells with c > ground_state.c + {FISSION_EXIT_GS_C_OFFSET}.", file=out)
-        if gs_idx is not None:
-            fe_threshold = float(axes['c'][gs_idx[c_axis_pos]]) + FISSION_EXIT_GS_C_OFFSET
-        else:
-            fe_threshold = float('nan')
-        fe_idx, fe_e = find_fission_exit_nd(energies, axes, fe_threshold)
-        if fe_idx is not None:
-            print(f"    ✓ Fission Exit at idx={fe_idx} {_format_coords(fe_idx, axes)},"
-                  f" E = {fe_e:.4f} MeV", file=out)
-        else:
-            print("    ✗ Fission Exit not found.", file=out)
-
-        print("\n  Step 5: Fission Saddle (single saddle between Ground State and Fission Exit)", file=out)
-        print("    Criterion: lowest barrier on the optimal path from Ground State to Fission", file=out)
-        print("               Exit, found by the Iterative Watershed/Flooding algorithm", file=out)
-        print("               (pes_analyzer.saddle.find_iwf_grid). Reported as 'Inner Saddle'", file=out)
-        print("               in CSVs/plots for downstream-schema compatibility.", file=out)
-        t0 = time.perf_counter()
-        inner_idx, inner_e = _saddle(gs_idx, fe_idx, "Inner Saddle")
-        print(f"  [time] Step 5 (fission saddle): {time.perf_counter() - t0:.2f} s", file=out)
-
-        print("\n  Step 6: Outer Saddle search SKIPPED (no secondary minimum).", file=out)
-        outer_idx, outer_e = None, float('nan')
+    if inner_idx is not None:
+        print(f"    ✓ Inner Saddle     at idx={inner_idx} {_format_coords(inner_idx, axes)}, E = {inner_e:.4f} MeV", file=out)
+    if outer_idx is not None:
+        print(f"    ✓ Outer Saddle     at idx={outer_idx} {_format_coords(outer_idx, axes)}, E = {outer_e:.4f} MeV", file=out)
+    if fe_idx is not None:
+        print(f"    ✓ Fission Exit     at idx={fe_idx} {_format_coords(fe_idx, axes)}, E = {fe_e:.4f} MeV", file=out)
+    else:
+        print("    ✗ Fission Exit not found.", file=out)
 
     def _to_cp(cp_type, name, idx, energy):
-        cp = CriticalPoint(cp_type, name)
+        cp_obj = CriticalPoint(cp_type, name)
         if idx is None:
-            return cp
-        cp.point = index_to_gridpoint(idx, axes, inactive_axes, components, energy)
-        cp.found = True
-        return cp
+            return cp_obj
+        cp_obj.point = index_to_gridpoint(idx, axes, inactive_axes, components, energy)
+        cp_obj.found = True
+        return cp_obj
 
     critical_points = {
         CriticalPointType.GROUND_STATE:      _to_cp(CriticalPointType.GROUND_STATE,      "Ground State",      gs_idx,    gs_e),
@@ -1314,11 +1121,7 @@ The program will:
     print(f"  Critical point analysis: N-D (auto-detected axes)")
     print(f"  Output DPI: {DPI}")
     print(f"  Ground state c threshold: {GROUND_STATE_C_THRESHOLD}")
-    print(f"  Secondary minimum search: {SECOND_MINIMUM_SEARCH}")
-    if SECOND_MINIMUM_SEARCH:
-        print(f"  Secondary minimum c max: {SECONDARY_MINIMUM_C_MAX_THRESHOLD}")
-    else:
-        print(f"  Fission exit c offset from GS: {FISSION_EXIT_GS_C_OFFSET}")
+    print(f"  Persistence threshold: {PERSISTENCE_THRESHOLD} MeV")
     print("=" * 70)
 
     # Determine files to process
@@ -1352,7 +1155,7 @@ The program will:
         # Multiple files: run in parallel threads, print in submission order
         # so the output mirrors the sorted (Z, N) file list rather than
         # completion order. Compute still runs in parallel because the
-        # heavy work (find_minima_grid, find_iwf_grid) releases the GIL.
+        # heavy work (find_watershed_segmentation) releases the GIL.
         n_workers = min(args.workers, len(files_to_process))
         print(f"\nProcessing {len(files_to_process)} files with {n_workers} thread workers")
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
