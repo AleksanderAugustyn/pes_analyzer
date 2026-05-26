@@ -143,6 +143,23 @@ pub fn local_minima_inner(
     finalize(raw, &shape, &strides, SortOrder::Ascending)
 }
 
+/// Find all strict local maxima in `energies` using the Chebyshev box of
+/// half-width `find_r`. Strict dual of `local_minima_inner`: a non-NaN
+/// cell qualifies iff at least one in-bounds non-NaN neighbour exists in
+/// the stencil and no such neighbour has strictly *higher* energy.
+/// Output sorted descending by energy; ties broken by `f64::total_cmp`
+/// (reversed).
+pub fn local_maxima_inner(
+    energies: ArrayViewD<'_, f64>,
+    find_r: usize,
+    confirm_r: Option<usize>,
+) -> Vec<(Vec<usize>, f64)> {
+    let shape: Vec<usize> = energies.shape().to_vec();
+    let strides = compute_strides(&shape);
+    let raw = local_extreme_inner(energies, find_r, confirm_r, |ne, e| ne > e);
+    finalize(raw, &shape, &strides, SortOrder::Descending)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +442,168 @@ mod tests {
         for r in 2usize..=4 {
             let two_pass = local_minima_inner(arr.view(), 1, Some(r));
             let direct = local_minima_inner(arr.view(), r, None);
+            assert_eq!(two_pass, direct, "mismatch at r={r}");
+        }
+    }
+
+    #[test]
+    fn single_peak_2d_has_one_maximum_at_center() {
+        // 3x3 mound: center is 1, surroundings are 0.
+        let e = vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let arr = to_dyn([3, 3], e);
+        let maxes = local_maxima_inner(arr.view(), 1, None);
+        assert_eq!(maxes.len(), 1);
+        assert_eq!(maxes[0].0, vec![1, 1]);
+        assert_eq!(maxes[0].1, 1.0);
+    }
+
+    #[test]
+    fn two_peaks_2d_returns_both() {
+        // 5x5 with two peaks at (0,0)=2 and (4,4)=2, valley of -3 between.
+        let mut e = vec![-3.0; 25];
+        e[0] = 2.0;
+        e[1] = 1.0;
+        e[5] = 1.0;
+        e[6] = 0.0;
+        e[24] = 2.0;
+        e[23] = 1.0;
+        e[19] = 1.0;
+        e[18] = 0.0;
+        let arr = to_dyn([5, 5], e);
+        let maxes = local_maxima_inner(arr.view(), 1, None);
+        let coords: Vec<Vec<usize>> = maxes.iter().map(|(c, _)| c.clone()).collect();
+        assert!(coords.contains(&vec![0, 0]));
+        assert!(coords.contains(&vec![4, 4]));
+    }
+
+    #[test]
+    fn diagonal_neighbor_disqualifies_maximum() {
+        // (1,1) = 5 with (0,0) = 10 — diagonal — must NOT be a local max.
+        let e = vec![
+            10.0, 0.0, 0.0, //
+            0.0, 5.0, 0.0,  //
+            0.0, 0.0, 0.0,  //
+        ];
+        let arr = to_dyn([3, 3], e);
+        let maxes = local_maxima_inner(arr.view(), 1, None);
+        let coords: Vec<Vec<usize>> = maxes.iter().map(|(c, _)| c.clone()).collect();
+        assert!(!coords.contains(&vec![1, 1]));
+        assert!(coords.contains(&vec![0, 0]));
+    }
+
+    #[test]
+    fn ties_are_local_maxima() {
+        // Two adjacent cells with energy 10 surrounded by 0s; both qualify
+        // because the predicate is strict `>`.
+        let e = vec![
+            0.0, 0.0, 0.0, 0.0,  //
+            0.0, 10.0, 10.0, 0.0, //
+            0.0, 0.0, 0.0, 0.0,  //
+        ];
+        let arr = to_dyn([3, 4], e);
+        let maxes = local_maxima_inner(arr.view(), 1, None);
+        let coords: Vec<Vec<usize>> = maxes.iter().map(|(c, _)| c.clone()).collect();
+        assert!(coords.contains(&vec![1, 1]));
+        assert!(coords.contains(&vec![1, 2]));
+    }
+
+    #[test]
+    fn nan_only_neighborhood_is_not_a_maximum() {
+        // Single valid cell, all neighbors NaN → must NOT be a maximum.
+        let n = f64::NAN;
+        let e = vec![n, n, n, n, 10.0, n, n, n, n];
+        let arr = to_dyn([3, 3], e);
+        let maxes = local_maxima_inner(arr.view(), 1, None);
+        assert!(maxes.is_empty());
+    }
+
+    #[test]
+    fn maxima_output_is_sorted_descending_by_energy() {
+        // Gradient fill so no two cells tie; only the two explicitly
+        // raised corners (linear 0 and 24) qualify as local maxima.
+        let mut e: Vec<f64> = (0..25).map(|i| -100.0 - i as f64).collect();
+        e[0] = -2.0;
+        e[24] = -1.0;
+        let arr = to_dyn([5, 5], e);
+        let maxes = local_maxima_inner(arr.view(), 1, None);
+        assert_eq!(maxes.len(), 2);
+        assert!(maxes[0].1 >= maxes[1].1);
+        assert_eq!(maxes[0].0, vec![4, 4]);
+        assert_eq!(maxes[0].1, -1.0);
+    }
+
+    #[test]
+    fn maxima_dimensionality_sweep_2_to_7() {
+        // For each ndim in 2..=7, build a tiny grid whose center cell is
+        // 1.0 and all others are 0.0; assert the center is the only max.
+        for ndim in 2..=7 {
+            let shape = vec![3usize; ndim];
+            let total: usize = shape.iter().product();
+            let mut data = vec![0.0; total];
+
+            let strides = compute_strides(&shape);
+            let center_lin: usize = vec![1usize; ndim]
+                .iter()
+                .zip(strides.iter())
+                .map(|(i, s)| i * s)
+                .sum();
+            data[center_lin] = 1.0;
+
+            let arr = Array::from_shape_vec(IxDyn(&shape), data).unwrap();
+            let maxes = local_maxima_inner(arr.view(), 1, None);
+            assert_eq!(maxes.len(), 1, "ndim={ndim}");
+            assert_eq!(maxes[0].0, vec![1; ndim], "ndim={ndim}");
+            assert_eq!(maxes[0].1, 1.0, "ndim={ndim}");
+        }
+    }
+
+    #[test]
+    fn maxima_find_1_confirm_2_matches_direct_2() {
+        // Mirror of find_1_confirm_2_matches_direct_2 with values negated.
+        let mut e = vec![-5.0; 25];
+        e[2 * 5 + 2] = -3.0;
+        e[4 * 5 + 4] = -1.0;
+        let arr = to_dyn([5, 5], e);
+
+        let two_pass = local_maxima_inner(arr.view(), 1, Some(2));
+        let direct = local_maxima_inner(arr.view(), 2, None);
+        assert_eq!(two_pass, direct);
+    }
+
+    #[test]
+    fn maxima_find_1_confirm_r_equivalence_sweep() {
+        // Same fixture style as find_1_confirm_r_equivalence_sweep, negated.
+        let shape = [4usize, 4, 4];
+        let total: usize = shape.iter().product();
+        let mut data: Vec<f64> = (0..total).map(|i| -10.0 - (i as f64) * 0.5).collect();
+        data[0] = -1.0;
+        data[total - 1] = -0.5;
+        let arr = to_dyn(shape, data);
+
+        for r in 2usize..=5 {
+            let two_pass = local_maxima_inner(arr.view(), 1, Some(r));
+            let direct = local_maxima_inner(arr.view(), r, None);
+            assert_eq!(two_pass, direct, "mismatch at r={r}");
+        }
+    }
+
+    #[test]
+    fn maxima_find_1_confirm_r_equivalence_with_nan_walls() {
+        // Mirror of find_1_confirm_r_equivalence_with_nan_walls (negated).
+        let n = f64::NAN;
+        #[rustfmt::skip]
+        let e = vec![
+            -5.0, -5.0, -5.0, -5.0, -5.0,
+            -5.0, -3.0,    n, -1.0, -5.0,
+            -5.0, -5.0,    n, -5.0, -5.0,
+            -5.0, -5.0,    n, -5.0, -5.0,
+            -5.0, -5.0, -5.0, -5.0, -5.0,
+        ];
+        let arr = to_dyn([5, 5], e);
+
+        for r in 2usize..=4 {
+            let two_pass = local_maxima_inner(arr.view(), 1, Some(r));
+            let direct = local_maxima_inner(arr.view(), r, None);
             assert_eq!(two_pass, direct, "mismatch at r={r}");
         }
     }
