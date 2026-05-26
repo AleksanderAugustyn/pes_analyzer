@@ -621,6 +621,26 @@ def run_critical_point_analysis_nd(
     )
     print(f"  [time] Step 2 (identification): {time.perf_counter() - t0:.2f} s", file=out)
 
+    # Physical-convention reconciliation. The topology algorithm assigns the
+    # first basin reached from GS in the Prim walk to "secondary_minimum" and
+    # the second to "fission_exit". For SHE-like topologies with a deep
+    # scission valley, the scission basin is the first reached (its merge
+    # into the GS component crosses the lowest saddle), so it lands in the
+    # SM slot and a more moderate basin lands in FE. Swap to enforce the
+    # convention "the basin at larger c is the Fission Exit". The saddle
+    # cells stay put — each saddle is a single grid point that geometrically
+    # sits between its two physical neighbors, so swapping basin labels alone
+    # leaves the inner/outer saddle markers in the right place.
+    if cp["secondary_minimum"] is not None and cp["fission_exit"] is not None:
+        sm_c = float(axes['c'][basins[cp["secondary_minimum"]][0][c_pos]])
+        fe_c = float(axes['c'][basins[cp["fission_exit"]][0][c_pos]])
+        if sm_c > fe_c:
+            print(f"    Note: swapped SM/FE labels (pre-swap SM.c={sm_c:.4f}, "
+                  f"FE.c={fe_c:.4f}); FE is now the basin at larger c.", file=out)
+            cp["secondary_minimum"], cp["fission_exit"] = (
+                cp["fission_exit"], cp["secondary_minimum"]
+            )
+
     def _basin_gp(bid):
         if bid is None:
             return None, float('nan')
