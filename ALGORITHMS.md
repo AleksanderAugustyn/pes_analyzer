@@ -55,3 +55,25 @@ Internally, both functions delegate to a single generic kernel `local_extreme_in
 Single-sweep combined search that produces both minima and maxima from one stencil walk per cell. For each non-NaN centre, the neighbour iteration maintains two flags (`beats_all_lower` for the minima check, `beats_all_higher` for the maxima check); the loop short-circuits only once both flags are settled. The two confirm-stage candidate lists are processed independently, since the surviving candidate sets are typically small and disjoint.
 
 The function exists purely for callers who need both polarities (e.g. saddle sanity checks against hilltops). For callers who only need one, the single-polarity entry points are faster because they can short-circuit on the first disqualifier.
+
+## `find_watershed_segmentation`
+
+Same imaginary-water-flow flood as `find_iwf_grid`, run to completion instead of stopping at the first endpoint-merge. The added bookkeeping records every union that merges two previously-disconnected basins as a merge event, and labels every non-`NaN` cell with the basin it first joined.
+
+**Implementation** (see `src/topology/watershed.rs`):
+
+1. Collect all non-`NaN` cells into a sorted `Vec<(flat_index, energy)>` (ascending by `total_cmp`), as in `find_iwf_grid`.
+2. Walk the sorted list. For each cell `c`:
+   - Look at already-processed neighbors and find their current basins via `basin_of_root[dsu.find(nbr)]`.
+   - If none are processed: `c` starts a new basin; assign it the next basin id; record `basins.push((c, energy))` and set `labels[c] = new_id`.
+   - If all processed neighbors are in one basin `b`: union `c` into it; `labels[c] = b`.
+   - If processed neighbors span two or more distinct basins: `c` is a saddle. Adopt the first basin as `labels[c]`. For each additional distinct basin, record a merge event `(c, energy, deeper, shallower)` with `deeper.min_e <= shallower.min_e`, then union and update the surviving basin id of the new root.
+3. Expand the compact `labels: Vec<u32>` into the public `int32` ndarray; cells with no compact-index (NaN) become `-1`.
+
+**Output convention.** `basins` is sorted ascending by minimum energy, so `basins[0]` is the deepest basin and contains the global minimum cell. `merges` is sorted ascending by saddle energy. For every merge, `basins[deeper].min_e <= basins[shallower].min_e`; the persistence of the shallower basin is `saddle_energy - basins[shallower].min_e`.
+
+**Why axis-only neighbours.** Same reason as `find_iwf_grid`: a physical reaction path on a PES grid follows the grid axes one step at a time. The merge tree describes the topology of basins connected by axis-only paths, which is the topology of interest for fission-barrier analysis.
+
+**Complexity.** `O(M log M)` where `M` = non-`NaN` cell count, identical to `find_iwf_grid`. The sort dominates; the union-find with path compression and union-by-rank is effectively `O(M α(M))`. Memory `O(M)` for the sorted vector, remap, DSU, basin-of-root, and labels.
+
+**Relation to `find_iwf_grid`.** `find_iwf_grid` is the two-point specialization: same flood, but it terminates the moment the start and end cells share a DSU root and returns that single saddle cell. `find_watershed_segmentation` keeps the flood going to completion and records every merge along the way. Callers that only need the saddle between two specified cells should keep using `find_iwf_grid` — it has the early-exit and avoids building the merge tree.

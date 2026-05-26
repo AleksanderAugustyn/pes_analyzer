@@ -314,6 +314,106 @@ print(maxs)  # plateau of 2.0s around the rim
 
 ---
 
+## `find_watershed_segmentation`
+
+```python
+from pes_analyzer.topology import find_watershed_segmentation
+
+def find_watershed_segmentation(
+    energies: numpy.ndarray[float64],
+) -> tuple[
+    numpy.ndarray[int32],                              # labels
+    list[tuple[tuple[int, ...], float]],               # basins
+    list[tuple[tuple[int, ...], float, int, int]],     # merges
+]:
+    ...
+```
+
+### Parameters
+
+- **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are masked.
+
+### Returns
+
+A 3-tuple `(labels, basins, merges)`:
+
+- **`labels`** — `int32` array with shape == `energies.shape`. `labels[cell] == -1` iff `energies[cell]` is NaN, otherwise the basin ID the cell first joined during the flood.
+- **`basins`** — `list[tuple[tuple[int, ...], float]]`, one entry per basin. `(min_nd_index, min_energy)`, sorted ascending by energy. `basins[0]` always contains the global minimum cell.
+- **`merges`** — `list[tuple[tuple[int, ...], float, int, int]]`, one entry per union that merged two distinct basins. `(saddle_nd_index, saddle_energy, deeper_basin_id, shallower_basin_id)`, sorted ascending by saddle energy. The convention `basins[deeper].min_e <= basins[shallower].min_e` always holds.
+
+### Raises
+
+- `ValueError` if `energies` is not C-contiguous or if `energies.ndim` is outside `[2, 7]`.
+
+### What it does
+
+Runs the imaginary-water-flow flood to completion (not just until two specified endpoints connect). Records every union that merges two previously-disconnected basins as a `(saddle, deeper, shallower)` event. This is the full segmentation that `find_iwf_grid` partially computes — `find_iwf_grid` is the two-point specialization that stops at the first basin-merge between its two endpoint cells.
+
+### Example
+
+```python
+import numpy as np
+from pes_analyzer.topology import find_watershed_segmentation
+
+energies = np.full((5, 5), 10.0)
+energies[0, 0] = 0.0
+energies[4, 4] = 0.0
+energies[2, :] = [3.0, 3.0, 4.0, 3.0, 3.0]   # bridge with saddle at (2, 2) = 4
+
+labels, basins, merges = find_watershed_segmentation(energies)
+print(basins)
+# [((0, 0), 0.0), ((4, 4), 0.0)]
+print(merges)
+# [((2, 2), 4.0, 0, 1)]   # or (..., 1, 0) — both basins have min_e == 0.0
+```
+
+---
+
+## Topology helpers
+
+The pure-Python helpers in `pes_analyzer.topology` analyse the merge tree produced by `find_watershed_segmentation`.
+
+### `compute_persistence(basins, merges) -> numpy.ndarray[float64]`
+
+Per-basin topological persistence. The deepest basin (`basins[0]`) has persistence `+inf`. Every other basin has persistence `saddle_energy − basin_minimum_energy`, computed from the merge event in which the basin was absorbed.
+
+### `prune_merge_tree(basins, merges, threshold) -> (list[int], list[merge])`
+
+Drops basins whose persistence is strictly less than `threshold`. Returns `(surviving_basin_ids, kept_merges)`. `kept_merges` is the subset of input merges whose `shallower` basin survives; the `deeper` basin always survives too (proof: if a kept merge has `shallower.persistence >= threshold` and `deeper.min_e <= shallower.min_e`, then `deeper.persistence >= shallower.persistence >= threshold`).
+
+### `identify_critical_points(basins, merges, threshold, *, gs_disqualifier=None) -> dict`
+
+Walks the pruned merge tree outward from the ground state by Prim-style edge relaxation: at each step, the lowest-saddle-energy edge with one end visited and one end not is consumed. Returns a dict with keys `ground_state`, `secondary_minimum`, `inner_saddle`, `outer_saddle`, `fission_exit`. Each value is either a basin ID, a merge tuple, or `None`.
+
+Three regimes:
+
+| Pruned tree | Result |
+|---|---|
+| Just GS | only `ground_state` is set |
+| GS + 1 outward basin (SHE-typical) | `ground_state`, `inner_saddle` (the one saddle), `fission_exit` set; SM and outer_saddle are `None` |
+| GS + 2+ outward basins (actinide-typical) | all five fields populated |
+
+The optional `gs_disqualifier` is a `Callable[[int], bool]`; returning `True` marks a basin as ineligible to be the ground state, and the picker falls back to the next-deepest surviving basin. Used by `MapMaker_FoS_SHE.py` to apply the `c <= 1.25` physical constraint.
+
+### Example
+
+```python
+import numpy as np
+from pes_analyzer.topology import (
+    find_watershed_segmentation, identify_critical_points,
+)
+
+energies = np.array([[0.0, 3.0, 8.0, 4.0, 1.0, 3.0, 5.0, 4.0, 2.0]])
+_, basins, merges = find_watershed_segmentation(energies)
+cp = identify_critical_points(basins, merges, threshold=2.0)
+print(cp["secondary_minimum"])   # 1   (the SM basin id)
+print(cp["fission_exit"])        # 2   (the FE basin id)
+print(cp["inner_saddle"][1])     # 8.0 (inner saddle energy)
+print(cp["outer_saddle"][1])     # 5.0 (outer saddle energy, lower than inner)
+```
+
+---
+
 ## Common errors
 
 | Error | Cause | Fix |

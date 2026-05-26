@@ -80,6 +80,7 @@ Inputs cross the boundary as `PyReadonlyArrayDyn`, which holds a read-lock on th
    - Register it in `src/lib.rs` (`<area>::register(m)?`).
    - Patch `sys.modules` for the dotted name in `<area>/mod.rs::register`.
    - Create `python/pes_analyzer/<area>/__init__.pyi` matching the runtime API.
+3a. **If the submodule needs Python helpers alongside the Rust kernel**, make `python/pes_analyzer/<area>/` a real Python package with an `__init__.py` that imports from `pes_analyzer._native.<area>` and re-exports the helpers. In this case, skip the `sys.modules` patch in `<area>/mod.rs::register` — the real on-disk package handles the dotted-name resolution. `pes_analyzer.topology` is the reference example.
 4. Add a Python integration test in `tests/test_<area>.py`. Tests run against the compiled `.so`, so `maturin develop` must be current.
 
 ## Build profile
