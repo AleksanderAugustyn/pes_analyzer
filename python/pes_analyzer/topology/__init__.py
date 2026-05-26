@@ -15,8 +15,17 @@ from __future__ import annotations
 # registered `topology` as an attribute of `_native` via `add_submodule`.
 from pes_analyzer._native import topology as _native_topology
 
+from ._tree import (
+    compute_persistence,
+    identify_critical_points,
+    prune_merge_tree,
+)
+
 find_watershed_segmentation = _native_topology.find_watershed_segmentation
 
 __all__ = [
     "find_watershed_segmentation",
+    "compute_persistence",
+    "prune_merge_tree",
+    "identify_critical_points",
 ]
