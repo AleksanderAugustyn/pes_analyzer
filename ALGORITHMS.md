@@ -24,7 +24,7 @@ Concise descriptions of the two compute kernels in `pes_analyzer`. Enough to deb
 
 **Local minima on the Chebyshev box of half-width `r` (default `r = 1`).** The predicate is *no neighbour within Chebyshev distance `r` has strictly lower energy*. At `r = 1` the stencil is the classic king-move 3ᴺ−1; at general `r` it is `(2r+1)ᴺ−1` cells. Ties are allowed by the strict-less-than test — a cell with one or more equal-energy neighbours qualifies as long as none is lower. A cell is reported iff it is non-`NaN`, has at least one non-`NaN` neighbour in the stencil, and no non-`NaN` neighbour has a strictly smaller energy value.
 
-**Implementation** (see `src/minimum/local_minima.rs`):
+**Implementation** (see `src/extrema/local_minima.rs`):
 
 1. Iterate every non-`NaN` cell in row-major order.
 2. Walk its Chebyshev-box neighbours via `common::nd::full_neighbors`.
@@ -40,3 +40,18 @@ Concise descriptions of the two compute kernels in `pes_analyzer`. Enough to deb
 **Complexity.** O(M · (2r+1)ᴺ) over non-`NaN` cells. For `r = 1`, `N = 7` the factor is 3⁷ − 1 = 2186 neighbour checks per cell. The factor grows fast with `r`: at `N = 7`, `r = 2` is already 78124, and `r = 5` is ≈ 1.95 × 10⁷. The validation cap `r ≤ 5` is the safety net.
 
 **Two-pass refinement via `confirm_range`.** Because the Chebyshev box of half-width 1 is a subset of every box with `r > 1`, every minimum at radius `R` is also a minimum at radius 1. Equivalently: any cell that fails the `r = 1` check cannot be a minimum at any wider radius. The `confirm_range` keyword exploits this: stage 1 runs the fast `r = 1` check on every cell to produce a usually-tiny candidate set, then stage 2 re-checks each candidate against the `confirm_range`-wide stencil. The result is identical to a direct check at `confirm_range`, but the cost drops from `O(M · (2R+1)ᴺ)` to `O(M · 3ᴺ + |candidates| · (2R+1)ᴺ)`. For smooth PES grids `|candidates|` is typically far below 1% of `M`.
+
+## `find_maxima_grid`
+
+Strict dual of `find_minima_grid` — same Chebyshev stencil, same two-pass `confirm_range` optimisation, same NaN handling. The only differences are:
+
+- the comparator inside the inner loop is flipped (`ne > e` instead of `ne < e`),
+- the output is sorted descending by energy via `f64::total_cmp` reversed.
+
+Internally, both functions delegate to a single generic kernel `local_extreme_inner<C>` in `src/extrema/local_minima.rs`, parameterised by an `is_dominated(neighbour, center) -> bool` closure that Rust monomorphises at compile time.
+
+## `find_extrema_grid`
+
+Single-sweep combined search that produces both minima and maxima from one stencil walk per cell. For each non-NaN centre, the neighbour iteration maintains two flags (`beats_all_lower` for the minima check, `beats_all_higher` for the maxima check); the loop short-circuits only once both flags are settled. The two confirm-stage candidate lists are processed independently, since the surviving candidate sets are typically small and disjoint.
+
+The function exists purely for callers who need both polarities (e.g. saddle sanity checks against hilltops). For callers who only need one, the single-polarity entry points are faster because they can short-circuit on the first disqualifier.

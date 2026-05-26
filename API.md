@@ -127,7 +127,7 @@ print(find_iwf_grid(energies, start=(1, 0), end=(1, 4)))
 ## `find_minima_grid`
 
 ```python
-from pes_analyzer.minimum import find_minima_grid
+from pes_analyzer.extrema import find_minima_grid
 
 def find_minima_grid(
     energies: numpy.ndarray[float64],
@@ -162,7 +162,7 @@ Returns every cell whose energy is **not strictly greater than any non-`NaN` nei
 
 ```python
 import numpy as np
-from pes_analyzer.minimum import find_minima_grid
+from pes_analyzer.extrema import find_minima_grid
 
 energies = np.array([
     [5.0, 5.0, 5.0],
@@ -178,7 +178,7 @@ A larger `neighborhood_range` disqualifies cells beaten by farther neighbours. T
 
 ```python
 import numpy as np
-from pes_analyzer.minimum import find_minima_grid
+from pes_analyzer.extrema import find_minima_grid
 
 energies = np.array([
     [np.nan, np.nan, np.nan, np.nan, np.nan],
@@ -211,6 +211,106 @@ print(find_minima_grid(energies, neighborhood_range=1, confirm_range=2))
 - **Plateaus are reported.** Every cell on a flat plateau that has no king-move neighbour with strictly lower energy qualifies. In a uniformly-flat region, every cell whose stencil contains no lower neighbour will appear in the output — including corner and edge cells of the plateau where the stencil happens to be entirely within the plateau. If you only want strictly-isolated minima, filter the output yourself.
 - **Boundary cells**: the stencil is clipped at array edges. A corner cell has fewer neighbours but is tested with the same rule.
 - **`NaN` neighbours** are ignored — a cell is tested only against its non-`NaN` neighbours. A cell with at least one non-`NaN` neighbour and no strictly-lower one is reported; a cell whose entire stencil is `NaN` is not.
+
+---
+
+## `find_maxima_grid`
+
+```python
+from pes_analyzer.extrema import find_maxima_grid
+
+def find_maxima_grid(
+    energies: numpy.ndarray[float64],
+    *,
+    neighborhood_range: int = 1,
+    confirm_range: int | None = None,
+) -> list[tuple[tuple[int, ...], float]]:
+    ...
+```
+
+### Parameters
+
+- **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are skipped.
+- **`neighborhood_range`** *(keyword-only, default `1`)* — Chebyshev half-width `r` of the neighbor stencil. Must satisfy `1 ≤ r ≤ 5`.
+- **`confirm_range`** *(keyword-only, default `None`)* — optional second-pass check. See [`find_minima_grid`](#find_minima_grid) for the semantics; the rule applies identically here with the comparator flipped.
+
+### Returns
+
+- `list[tuple[tuple[int, ...], float]]` — every cell that qualifies as a maximum as `(index, energy)`. Sorted descending by energy; ties broken by `f64::total_cmp` (reversed) for determinism.
+
+### Raises
+
+Same as `find_minima_grid`: `ValueError`, `TypeError`, `OverflowError` per the validation table.
+
+### What it does
+
+Strict dual of `find_minima_grid`: returns every cell whose energy is **not strictly less than any non-`NaN` neighbour** in the Chebyshev box of half-width `neighborhood_range`. Ties are allowed.
+
+### Example
+
+```python
+import numpy as np
+from pes_analyzer.extrema import find_maxima_grid
+
+energies = np.array([
+    [0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0],
+])
+
+print(find_maxima_grid(energies))
+# [((1, 1), 1.0)]
+```
+
+---
+
+## `find_extrema_grid`
+
+```python
+from pes_analyzer.extrema import find_extrema_grid
+
+def find_extrema_grid(
+    energies: numpy.ndarray[float64],
+    *,
+    neighborhood_range: int = 1,
+    confirm_range: int | None = None,
+) -> tuple[
+    list[tuple[tuple[int, ...], float]],  # minima, ascending
+    list[tuple[tuple[int, ...], float]],  # maxima, descending
+]:
+    ...
+```
+
+### Parameters
+
+Same as `find_minima_grid` / `find_maxima_grid`. The two polarities share a single `neighborhood_range` and a single `confirm_range`.
+
+### Returns
+
+A 2-tuple `(minima_list, maxima_list)`. Each list has the same shape as the corresponding single-polarity function would produce. Minima are sorted ascending by energy, maxima descending.
+
+The combined result is byte-identical to `(find_minima_grid(arr, **k), find_maxima_grid(arr, **k))`. The optimisation is purely a constant-factor saving — one stencil walk per cell in the find stage instead of two.
+
+### Raises
+
+Same as `find_minima_grid`.
+
+### Example
+
+```python
+import numpy as np
+from pes_analyzer.extrema import find_extrema_grid
+
+energies = np.array([
+    [1.0, 2.0, 1.0],
+    [2.0, 0.0, 2.0],
+    [1.0, 2.0, 1.0],
+])
+
+mins, maxs = find_extrema_grid(energies)
+print(mins)  # [((1, 1), 0.0)]
+print(maxs)  # plateau of 2.0s around the rim
+```
 
 ---
 

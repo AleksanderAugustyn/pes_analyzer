@@ -14,9 +14,10 @@ pes_analyzer/
 │   │   ├── nd.rs         — N-D indexing helpers
 │   │   ├── dsu.rs        — union-find used by IWF
 │   │   └── validate.rs   — pre-flight input checks for PyO3 wrappers
-│   ├── minimum/
-│   │   ├── mod.rs        — PyO3 wrapper for find_minima_grid
-│   │   └── local_minima.rs — pure-Rust kernel
+│   ├── extrema/
+│   │   ├── mod.rs              — PyO3 wrappers for find_minima_grid, find_maxima_grid, find_extrema_grid
+│   │   ├── local_minima.rs     — generic local_extreme_inner<C> kernel + minima/maxima wrappers
+│   │   └── local_extrema.rs    — combined single-sweep local_extrema_inner kernel
 │   └── saddle/
 │       ├── mod.rs        — PyO3 wrapper for find_iwf_grid
 │       └── iwf_grid.rs   — pure-Rust kernel
@@ -25,17 +26,17 @@ pes_analyzer/
 │   ├── grid.py           — pure-Python build_dense helper
 │   ├── _native.abi3.so   — compiled extension (built by maturin)
 │   ├── saddle/__init__.pyi — type stub (see below)
-│   └── minimum/__init__.pyi — type stub
+│   └── extrema/__init__.pyi — type stubs for all three extrema functions
 └── tests/                — pytest integration tests
 ```
 
 ## The Python / Rust seam
 
-`maturin` builds a single compiled extension installed at `python/pes_analyzer/_native.abi3.so`. The Python package `pes_analyzer` re-exports `_native.saddle` and `_native.minimum` so users can write `from pes_analyzer.saddle import find_iwf_grid`.
+`maturin` builds a single compiled extension installed at `python/pes_analyzer/_native.abi3.so`. The Python package `pes_analyzer` re-exports `_native.saddle` and `_native.extrema` so users can write `from pes_analyzer.saddle import find_iwf_grid`.
 
 ### The `.pyi` stub trick
 
-The runtime submodules `pes_analyzer.saddle` and `pes_analyzer.minimum` are registered dynamically from Rust by patching `sys.modules`:
+The runtime submodules `pes_analyzer.saddle` and `pes_analyzer.extrema` are registered dynamically from Rust by patching `sys.modules`:
 
 ```rust
 // src/saddle/mod.rs:78-80
@@ -44,7 +45,7 @@ let modules = sys.getattr("modules")?;
 modules.set_item("pes_analyzer.saddle", &m)?;
 ```
 
-Static type checkers cannot see that registration, so the on-disk stubs `python/pes_analyzer/saddle/__init__.pyi` and `python/pes_analyzer/minimum/__init__.pyi` exist purely to satisfy them. **Any new submodule needs both halves**: the `sys.modules` patch in Rust *and* a matching `__init__.pyi` for the type checker.
+Static type checkers cannot see that registration, so the on-disk stubs `python/pes_analyzer/saddle/__init__.pyi` and `python/pes_analyzer/extrema/__init__.pyi` exist purely to satisfy them. **Any new submodule needs both halves**: the `sys.modules` patch in Rust *and* a matching `__init__.pyi` for the type checker.
 
 ## GIL handling
 

@@ -11,7 +11,9 @@ Quantum-chemistry calculations produce potential energy surfaces (PES) as dense 
 ## What it does
 
 - **`pes_analyzer.saddle.find_iwf_grid`** — imaginary water flow (watershed) saddle search between two grid points.
-- **`pes_analyzer.minimum.find_minima_grid`** — local minima on the Chebyshev king-move stencil (default 3ᴺ−1; widen via `confirm_range` for a fast two-pass check, or via `neighborhood_range` for a direct wider check).
+- **`pes_analyzer.extrema.find_minima_grid`** — local minima on the Chebyshev king-move stencil (default 3ᴺ−1; widen via `confirm_range` for a fast two-pass check, or via `neighborhood_range` for a direct wider check).
+- **`pes_analyzer.extrema.find_maxima_grid`** — strict dual of `find_minima_grid`. Same stencil and same `neighborhood_range` / `confirm_range` semantics; output sorted descending by energy.
+- **`pes_analyzer.extrema.find_extrema_grid`** — combined single-sweep search. Returns `(minima, maxima)` byte-identical to calling the two single-polarity functions separately, at the cost of one extra-list allocation but one fewer stencil walk per cell.
 - **`pes_analyzer.grid.build_dense`** — scatter helper that turns sparse `(coords, value)` rows into a dense `numpy` array indexed in axis order.
 
 ## Installation
@@ -31,7 +33,7 @@ For day-to-day development (editable installs, running tests, rebuilding after R
 import numpy as np
 
 from pes_analyzer.saddle  import find_iwf_grid
-from pes_analyzer.minimum import find_minima_grid
+from pes_analyzer.extrema import find_minima_grid
 
 # A toy 2x5 PES: two basins at (0, 0) and (0, 4) along the top row,
 # separated by a hump that peaks at (0, 2). The bottom row is a high
@@ -54,7 +56,9 @@ print(find_iwf_grid(energies, start=(0, 0), end=(0, 4)))
 |---|---|---|
 | `grid.build_dense(coords, values)` | sparse rows → dense N-D array | [API.md](./API.md#build_dense) |
 | `saddle.find_iwf_grid(energies, start, end)` | watershed saddle search | [API.md](./API.md#find_iwf_grid) |
-| `minimum.find_minima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local minima (Chebyshev stencil) | [API.md](./API.md#find_minima_grid) |
+| `extrema.find_minima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local minima (Chebyshev stencil) | [API.md](./API.md#find_minima_grid) |
+| `extrema.find_maxima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local maxima (dual of `find_minima_grid`) | [API.md](./API.md#find_maxima_grid) |
+| `extrema.find_extrema_grid(energies, *, neighborhood_range=1, confirm_range=None)` | combined single-sweep search | [API.md](./API.md#find_extrema_grid) |
 
 ## Documentation
 
