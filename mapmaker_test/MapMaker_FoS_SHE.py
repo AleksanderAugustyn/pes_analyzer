@@ -1043,6 +1043,60 @@ def plot_persistence_histogram(tree: "MergeTree", nucleus: NucleusInfo,
     print(f"  Saved persistence histogram: {output_filename}", file=out)
 
 
+def _merge_tree_segments(tree, displayed_ids, c_pos, top_energy):
+    """Draw-ready dendrogram segments for a subset of merge-tree basins.
+
+    Pure layout, no matplotlib. X positions are the rank of each displayed
+    basin in ascending-``c`` order (even spacing). Each basin gets a vertical
+    segment from its minimum up to the energy at which it merges into the
+    nearest *displayed* ancestor; a horizontal connector links it to that
+    ancestor at the saddle energy. Basins whose nearest displayed ancestor is
+    the root (or themselves the root) run up to ``top_energy``.
+
+    Parameters
+    ----------
+    tree : MergeTree
+    displayed_ids : iterable of int
+        Basin ids to draw (all basins, or the pruned survivors).
+    c_pos : int
+        Index of the ``c`` axis in each basin's ``minimum_index``.
+    top_energy : float
+        Energy at which root / parentless branches terminate.
+
+    Returns
+    -------
+    x_of : dict[int, int]
+        Basin id -> x position (rank in c order).
+    vsegs : dict[int, tuple[int, float, float]]
+        Basin id -> (x, e_bottom, e_top).
+    hsegs : list[tuple[int, int, float, int]]
+        (x_child, x_ancestor, e_saddle, child_id) connectors.
+    """
+    disp = set(displayed_ids)
+    ids = sorted(disp, key=lambda b: tree.node(b).minimum_index[c_pos])
+    x_of = {b: i for i, b in enumerate(ids)}
+
+    vsegs = {}
+    hsegs = []
+    for b in ids:
+        node = tree.node(b)
+        e_bottom = node.minimum_energy
+
+        anc = node.parent
+        while anc is not None and anc not in disp:
+            anc = tree.node(anc).parent
+
+        if node.saddle_to_parent is None or anc is None:
+            e_top = top_energy
+        else:
+            e_top = node.saddle_to_parent[1]
+            hsegs.append((x_of[b], x_of[anc], e_top, b))
+
+        vsegs[b] = (x_of[b], e_bottom, e_top)
+
+    return x_of, vsegs, hsegs
+
+
 def print_analysis_summary(critical_points: dict[CriticalPointType, CriticalPoint],
                            nucleus: NucleusInfo,
                            out: TextIO = sys.stdout):
