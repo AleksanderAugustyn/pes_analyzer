@@ -58,3 +58,33 @@ def test_segments_skip_pruned_ancestor():
     x_of, vsegs, hsegs = mm._merge_tree_segments(tree, {0, 2}, c_pos=0, top_energy=0.0)
     h2 = [h for h in hsegs if h[3] == 2][0]
     assert h2[1] == x_of[0]   # connects to nearest *displayed* ancestor (root)
+
+
+def test_plot_merge_tree_writes_two_panel_png(tmp_path):
+    tree, axes, _, _ = _synthetic_tree()
+    roles = {
+        "ground_state": 0,
+        "secondary_minimum": 1,
+        "third_minimum": None,
+        "fission_exit": 3,
+        "inner_saddle": ((2, 1), -6.0),
+        "outer_saddle": ((6, 1), -5.0),
+        "third_saddle": None,
+    }
+    nucleus = mm.NucleusInfo()
+    nucleus.isotope_label = "Test"
+    nucleus.A, nucleus.symbol = 999, "Ts"
+
+    out = tmp_path / "merge_tree.png"
+    import io
+    mm.plot_merge_tree(tree, roles, axes, nucleus, str(out), out=io.StringIO())
+
+    assert out.exists() and out.stat().st_size > 0
+
+
+def test_prune_reduces_displayed_count():
+    # Sanity: at the default prune threshold the noise basin (persist 0.05) drops.
+    tree, _, basins, merges = _synthetic_tree()
+    surviving, _kept = prune_merge_tree(basins, merges, mm.MERGE_TREE_PRUNE)
+    assert set(surviving) == {0, 1, 3}        # noise basin 2 removed
+    assert len(surviving) < len(basins)

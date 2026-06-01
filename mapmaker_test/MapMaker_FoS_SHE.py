@@ -46,6 +46,7 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 import numpy as np
 import polars as pl
 from scipy.interpolate import griddata
@@ -1095,6 +1096,165 @@ def _merge_tree_segments(tree, displayed_ids, c_pos, top_energy):
         vsegs[b] = (x_of[b], e_bottom, e_top)
 
     return x_of, vsegs, hsegs
+
+
+# Role -> (matplotlib marker, face color, label) for the named critical points.
+# Mirrors create_contour_plot's marker_styles so the two figures agree.
+_MERGE_TREE_ROLE_STYLE = {
+    "ground_state":      ("o", "lime",   "Ground State"),
+    "secondary_minimum": ("o", "red",    "Secondary Minimum"),
+    "third_minimum":     ("o", "orange", "Third Minimum"),
+    "fission_exit":      ("o", "white",  "Fission Exit"),
+}
+_MERGE_TREE_SADDLE_STYLE = {
+    "inner_saddle": ("lime",   "Inner Saddle"),
+    "outer_saddle": ("red",    "Outer Saddle"),
+    "third_saddle": ("orange", "Third Saddle"),
+}
+
+
+def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos, a4_pos,
+                           show_labels):
+    """Draw one dendrogram panel onto ``ax``. Returns the number of markers drawn."""
+    disp = set(displayed_ids)
+
+    # Top of the panel: a margin above the highest minimum / saddle on display.
+    energies = [tree.node(b).minimum_energy for b in disp]
+    for b in disp:
+        s = tree.node(b).saddle_to_parent
+        if s is not None:
+            energies.append(s[1])
+    e_lo, e_hi = min(energies), max(energies)
+    top_energy = e_hi + 0.05 * (e_hi - e_lo + 1e-9)
+
+    x_of, vsegs, hsegs = _merge_tree_segments(tree, disp, c_pos, top_energy)
+
+    # Branches (vertical) and saddle connectors (horizontal).
+    for _b, (x, e_bot, e_top) in vsegs.items():
+        ax.plot([x, x], [e_bot, e_top], color="0.4", lw=1.2, zorder=1)
+    for x_child, x_anc, e_saddle, _child in hsegs:
+        ax.plot([x_child, x_anc], [e_saddle, e_saddle], color="0.4", lw=1.2, zorder=1)
+
+    # Named-basin lookup: basin id -> role key.
+    basin_role = {
+        roles[k]: k for k in _MERGE_TREE_ROLE_STYLE
+        if roles.get(k) is not None and roles[k] in disp
+    }
+    # Saddle-index -> role color, for coloring connectors.
+    saddle_role_color = {}
+    for k, (color, _lbl) in _MERGE_TREE_SADDLE_STYLE.items():
+        s = roles.get(k)
+        if s is not None:
+            saddle_role_color[tuple(int(i) for i in s[0])] = color
+
+    # Saddle squares on the matching connectors.
+    for x_child, x_anc, e_saddle, child in hsegs:
+        s = tree.node(child).saddle_to_parent
+        if s is None:
+            continue
+        color = saddle_role_color.get(tuple(int(i) for i in s[0]))
+        if color is not None:
+            ax.plot((x_child + x_anc) / 2.0, e_saddle, "s", color=color,
+                    markersize=9, markeredgecolor="black", markeredgewidth=1.2,
+                    zorder=4)
+
+    # Basin markers + labels. A basin is marked iff it is named OR clears the
+    # persistence floor.
+    n_markers = 0
+    label_parts_axes = [("c", c_pos)]
+    if a4_pos is not None:
+        label_parts_axes.append(("a4", a4_pos))
+    for b in disp:
+        node = tree.node(b)
+        named = b in basin_role
+        if not named and not (node.persistence > MERGE_TREE_MARKER_MIN):
+            continue
+        if named:
+            marker, color, _lbl = _MERGE_TREE_ROLE_STYLE[basin_role[b]]
+            size = 10
+        else:
+            marker, color, size = "o", "lightgray", 6
+        x = x_of[b]
+        ax.plot(x, node.minimum_energy, marker, color=color, markersize=size,
+                markeredgecolor="black", markeredgewidth=1.2, zorder=5)
+        n_markers += 1
+
+        if show_labels:
+            label = "  ".join(
+                f"{name}={float(axes[name][node.minimum_index[pos]]):.3f}"
+                for name, pos in label_parts_axes
+            )
+            label += f"\nE={node.minimum_energy:.3f}"
+            ax.annotate(label, (x, node.minimum_energy),
+                        textcoords="offset points", xytext=(6, 6),
+                        fontsize=7, zorder=6)
+
+    ax.set_xlim(-1, max(x_of.values()) + 1 if x_of else 1)
+    ax.set_xticks([])
+    return n_markers
+
+
+def plot_merge_tree(tree, roles, axes, nucleus, output_filename,
+                    out: TextIO = sys.stdout) -> None:
+    """Two-panel merge-tree dendrogram: unpruned (all basins) vs pruned.
+
+    ``roles`` is the ``sel`` dict from select_fos_critical_points: keys
+    ``ground_state`` / ``secondary_minimum`` / ``third_minimum`` /
+    ``fission_exit`` (basin ids or None) and ``inner_saddle`` / ``outer_saddle``
+    / ``third_saddle`` ((index, energy) tuples or None). Energy is the vertical
+    axis; x is c-ordering only. See the design spec for the full contract.
+    """
+    if not tree.nodes:
+        print("    No basins to plot in merge tree", file=out)
+        return
+
+    axis_names = list(axes)
+    c_pos = axis_names.index("c") if "c" in axis_names else 0
+    a4_pos = axis_names.index("a4") if "a4" in axis_names else None
+
+    all_ids = list(tree.nodes.keys())
+    basins = [(tree.node(b).minimum_index, tree.node(b).minimum_energy)
+              for b in sorted(tree.nodes)]
+    surviving, _kept = prune_merge_tree(basins, tree._merges, MERGE_TREE_PRUNE)
+
+    panels = [
+        ("Unpruned", all_ids),
+        (f"Pruned ≥{MERGE_TREE_PRUNE:g} MeV", surviving),
+    ]
+
+    with _PLOT_LOCK:
+        fig = Figure(figsize=(14, 8))
+        title = nucleus.isotope_label or Path(output_filename).stem
+
+        for col, (panel_label, ids) in enumerate(panels):
+            ax = fig.add_subplot(1, 2, col + 1)
+            show_labels = len(ids) <= MERGE_TREE_LABEL_MAX
+            _draw_merge_tree_panel(ax, tree, ids, roles, axes, c_pos, a4_pos,
+                                   show_labels)
+            ax.set_title(f"{panel_label}  (n={len(ids)})", fontsize=13)
+            ax.set_ylabel("E (MeV)", fontsize=13)
+
+        # One shared legend (named criticals) on the right panel.
+        handles = []
+        for k, (marker, color, lbl) in _MERGE_TREE_ROLE_STYLE.items():
+            if roles.get(k) is not None:
+                handles.append(Line2D([], [], marker=marker, color="none",
+                                      markerfacecolor=color, markeredgecolor="black",
+                                      markersize=9, label=lbl))
+        for k, (color, lbl) in _MERGE_TREE_SADDLE_STYLE.items():
+            if roles.get(k) is not None:
+                handles.append(Line2D([], [], marker="s", color="none",
+                                      markerfacecolor=color, markeredgecolor="black",
+                                      markersize=9, label=lbl))
+        if handles:
+            fig.axes[-1].legend(handles=handles, loc="upper right", fontsize=9,
+                                framealpha=0.95)
+
+        fig.suptitle(f"Merge tree — {title}", fontsize=15)
+        fig.tight_layout()
+        fig.savefig(output_filename, dpi=DPI, bbox_inches="tight")
+
+    print(f"  Saved merge-tree plot: {output_filename}", file=out)
 
 
 def print_analysis_summary(critical_points: dict[CriticalPointType, CriticalPoint],
