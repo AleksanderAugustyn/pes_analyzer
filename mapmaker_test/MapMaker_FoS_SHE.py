@@ -651,17 +651,14 @@ def run_critical_point_analysis_nd(
     dict[str, np.ndarray],
     dict[str, float],
     dict[str, np.ndarray],
+    "MergeTree",
 ]:
-    """Single dimension-agnostic critical-point pipeline (replaces the
-    paired run_critical_point_analysis / run_critical_point_analysis_5d).
+    """Dimension-agnostic PES topology analysis + FoS physics layer.
 
-    Returns
-    -------
-    critical_points : dict[CriticalPointType, CriticalPoint]
-    energies        : dense N-D grid (used by the plot path).
-    axes            : sorted unique values per active axis.
-    inactive_axes   : {axis_name: constant_value} for present-but-constant axes.
-    components      : per-component dense N-D grids.
+    The library does the physics-free part (extrema, watershed, merge tree);
+    the GS / SM / FE identification is composed here from neutral primitives.
+
+    Returns critical_points, energies, axes, inactive_axes, components, tree.
     """
     print("\n  --- Critical Point Analysis (N-D) ---", file=out)
     t_total = time.perf_counter()
@@ -676,81 +673,70 @@ def run_critical_point_analysis_nd(
           f"non-NaN cells: {int(np.count_nonzero(~np.isnan(energies))):,}", file=out)
     print(f"  [time] Step 0 (build grid): {time.perf_counter() - t0:.2f} s", file=out)
 
-    print("\n  Step 1: Watershed segmentation", file=out)
+    print("\n  Step 1: Confirmed local minima (range-2)", file=out)
+    t0 = time.perf_counter()
+    minima = find_minima_grid(energies, neighborhood_range=1, confirm_range=CONFIRM_RANGE)
+    print(f"    Confirmed minima: {len(minima)}", file=out)
+    print(f"  [time] Step 1 (minima): {time.perf_counter() - t0:.2f} s", file=out)
+
+    print("\n  Step 2: Watershed segmentation + merge tree (no pruning)", file=out)
     t0 = time.perf_counter()
     labels, basins, merges = find_watershed_segmentation(energies)
-    print(f"    Basins found: {len(basins)}; merge events: {len(merges)}", file=out)
-    print(f"  [time] Step 1 (watershed): {time.perf_counter() - t0:.2f} s", file=out)
+    tree = MergeTree(labels, basins, merges)
+    print(f"    Basins: {len(basins)}; merge events: {len(merges)}", file=out)
+    print(f"  [time] Step 2 (watershed+tree): {time.perf_counter() - t0:.2f} s", file=out)
 
-    print("\n  Step 2: Persistence-pruned critical-point identification", file=out)
-    print(f"    Persistence threshold: {PERSISTENCE_THRESHOLD} MeV", file=out)
-    print(f"    Ground-state c constraint: c <= {GROUND_STATE_C_THRESHOLD}", file=out)
+    print("\n  Step 3: Critical-point identification (FoS physics)", file=out)
+    print(f"    Ground-state c constraint: c < {GROUND_STATE_C_THRESHOLD}", file=out)
     t0 = time.perf_counter()
 
     c_pos = list(axes).index('c')
+    a4_axis = list(axes).index('a4') if 'a4' in axes else None
 
-    def gs_disqualifier(bid: int) -> bool:
-        bmin_nd_idx = basins[bid][0]
-        return float(axes['c'][bmin_nd_idx[c_pos]]) > GROUND_STATE_C_THRESHOLD
+    min_indices = [idx for idx, _e in minima]
+    min_basins = tree.basins_containing(min_indices)
+    print(f"    Basins containing a confirmed minimum: {len(min_basins)}", file=out)
 
-    cp = identify_critical_points(
-        basins, merges, PERSISTENCE_THRESHOLD,
-        gs_disqualifier=gs_disqualifier,
-    )
-    print(f"  [time] Step 2 (identification): {time.perf_counter() - t0:.2f} s", file=out)
+    def has_min(bid: int) -> bool:
+        return bid in min_basins
 
-    # Physical-convention reconciliation. The topology algorithm assigns the
-    # first basin reached from GS in the Prim walk to "secondary_minimum" and
-    # the second to "fission_exit". For SHE-like topologies with a deep
-    # scission valley, the scission basin is the first reached (its merge
-    # into the GS component crosses the lowest saddle), so it lands in the
-    # SM slot and a more moderate basin lands in FE. Swap to enforce the
-    # convention "the basin at larger c is the Fission Exit". The saddle
-    # cells stay put — each saddle is a single grid point that geometrically
-    # sits between its two physical neighbors, so swapping basin labels alone
-    # leaves the inner/outer saddle markers in the right place.
-    if cp["secondary_minimum"] is not None and cp["fission_exit"] is not None:
-        sm_c = float(axes['c'][basins[cp["secondary_minimum"]][0][c_pos]])
-        fe_c = float(axes['c'][basins[cp["fission_exit"]][0][c_pos]])
-        if sm_c > fe_c:
-            print(f"    Note: swapped SM/FE labels (pre-swap SM.c={sm_c:.4f}, "
-                  f"FE.c={fe_c:.4f}); FE is now the basin at larger c.", file=out)
-            cp["secondary_minimum"], cp["fission_exit"] = (
-                cp["fission_exit"], cp["secondary_minimum"]
-            )
+    def c_of(bid: int) -> float:
+        return float(axes['c'][tree.node(bid).minimum_index[c_pos]])
+
+    sel = select_fos_critical_points(tree, has_min, c_of, a4_axis)
+    print(f"  [time] Step 3 (identification): {time.perf_counter() - t0:.2f} s", file=out)
 
     def _basin_gp(bid):
         if bid is None:
             return None, float('nan')
-        return basins[bid][0], basins[bid][1]
+        node = tree.node(bid)
+        return node.minimum_index, node.minimum_energy
 
-    def _saddle_gp(m):
-        if m is None:
+    def _saddle_gp(s):
+        if s is None:
             return None, float('nan')
-        return m[0], m[1]
+        return s[0], s[1]
 
-    gs_idx,    gs_e    = _basin_gp (cp["ground_state"])
-    sm_idx,    sm_e    = _basin_gp (cp["secondary_minimum"])
-    fe_idx,    fe_e    = _basin_gp (cp["fission_exit"])
-    inner_idx, inner_e = _saddle_gp(cp["inner_saddle"])
-    outer_idx, outer_e = _saddle_gp(cp["outer_saddle"])
+    gs_idx,    gs_e    = _basin_gp (sel["ground_state"])
+    sm_idx,    sm_e    = _basin_gp (sel["secondary_minimum"])
+    fe_idx,    fe_e    = _basin_gp (sel["fission_exit"])
+    inner_idx, inner_e = _saddle_gp(sel["inner_saddle"])
+    outer_idx, outer_e = _saddle_gp(sel["outer_saddle"])
 
     if gs_idx is not None:
-        print(f"    ✓ Ground State     at idx={gs_idx} {_format_coords(gs_idx, axes)}, E = {gs_e:.4f} MeV", file=out)
+        print(f"    ✓ Ground State      at idx={gs_idx} {_format_coords(gs_idx, axes)}, E = {gs_e:.4f} MeV", file=out)
     else:
         print("    ✗ Ground State not found.", file=out)
-
     if sm_idx is not None:
         print(f"    ✓ Secondary Minimum at idx={sm_idx} {_format_coords(sm_idx, axes)}, E = {sm_e:.4f} MeV", file=out)
     else:
-        print("    - Secondary Minimum: none surviving persistence threshold.", file=out)
-
+        print("    - Secondary Minimum: none found.", file=out)
     if inner_idx is not None:
-        print(f"    ✓ Inner Saddle     at idx={inner_idx} {_format_coords(inner_idx, axes)}, E = {inner_e:.4f} MeV", file=out)
+        print(f"    ✓ Inner Saddle      at idx={inner_idx} {_format_coords(inner_idx, axes)}, E = {inner_e:.4f} MeV", file=out)
     if outer_idx is not None:
-        print(f"    ✓ Outer Saddle     at idx={outer_idx} {_format_coords(outer_idx, axes)}, E = {outer_e:.4f} MeV", file=out)
+        print(f"    ✓ Outer Saddle      at idx={outer_idx} {_format_coords(outer_idx, axes)}, E = {outer_e:.4f} MeV", file=out)
     if fe_idx is not None:
-        print(f"    ✓ Fission Exit     at idx={fe_idx} {_format_coords(fe_idx, axes)}, E = {fe_e:.4f} MeV", file=out)
+        print(f"    ✓ Fission Exit      at idx={fe_idx} {_format_coords(fe_idx, axes)}, E = {fe_e:.4f} MeV", file=out)
     else:
         print("    ✗ Fission Exit not found.", file=out)
 
@@ -772,7 +758,7 @@ def run_critical_point_analysis_nd(
 
     print(f"\n  [time] Total critical point analysis: "
           f"{time.perf_counter() - t_total:.2f} s", file=out)
-    return critical_points, energies, axes, inactive_axes, components
+    return critical_points, energies, axes, inactive_axes, components, tree
 
 
 # =============================================================================
@@ -1009,7 +995,7 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
 
     df = read_parquet_file(parquet_file, out=out)
 
-    critical_points, energies, axes, inactive_axes, components = \
+    critical_points, energies, axes, inactive_axes, components, tree = \
         run_critical_point_analysis_nd(df, out=out)
 
     print_analysis_summary(critical_points, nucleus, out=out)
@@ -1219,7 +1205,6 @@ The program will:
     print(f"  Critical point analysis: N-D (auto-detected axes)")
     print(f"  Output DPI: {DPI}")
     print(f"  Ground state c threshold: {GROUND_STATE_C_THRESHOLD}")
-    print(f"  Persistence threshold: {PERSISTENCE_THRESHOLD} MeV")
     print("=" * 70)
 
     # Determine files to process
