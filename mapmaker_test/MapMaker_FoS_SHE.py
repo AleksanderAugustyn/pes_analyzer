@@ -1148,24 +1148,52 @@ def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos, a4_pos,
         if s is not None:
             saddle_role_color[tuple(int(i) for i in s[0])] = color
 
-    # Saddle squares on the matching connectors.
+    # Shared label formatting + de-collision placement (basins and saddles).
+    e_span = e_hi - e_lo + 1e-9
+    placed_labels = []          # (x, energy) anchors already labeled
+    label_parts_axes = [("c", c_pos)]
+    if a4_pos is not None:
+        label_parts_axes.append(("a4", a4_pos))
+
+    def _coord_label(idx, energy):
+        parts = "  ".join(
+            f"{name}={float(axes[name][idx[pos]]):.3f}"
+            for name, pos in label_parts_axes
+        )
+        return parts + f"\nE={energy:.3f}"
+
+    def _place_label(text, x, energy):
+        # Labels run horizontally, so two on the same energy row overprint even
+        # when their points are several ranks apart. Collision keys on energy
+        # proximity (same row) with a wide x window scaled to the panel's node
+        # count; a colliding label drops below its point instead of above.
+        x_win = max(4.0, 0.25 * len(disp))
+        collides = any(
+            abs(px - x) <= x_win and abs(pe - energy) <= 0.04 * e_span
+            for px, pe in placed_labels
+        )
+        dy, va = (-8, "top") if collides else (6, "bottom")
+        ax.annotate(text, (x, energy), textcoords="offset points",
+                    xytext=(6, dy), va=va, fontsize=7, zorder=6)
+        placed_labels.append((x, energy))
+
+    # Saddle squares + labels on the matching connectors. Saddles are named
+    # critical points, so they are always labeled.
     for x_child, x_anc, e_saddle, child in hsegs:
         s = tree.node(child).saddle_to_parent
         if s is None:
             continue
         color = saddle_role_color.get(tuple(int(i) for i in s[0]))
         if color is not None:
-            ax.plot((x_child + x_anc) / 2.0, e_saddle, "s", color=color,
-                    markersize=9, markeredgecolor="black", markeredgewidth=1.2,
-                    zorder=4)
+            xs = (x_child + x_anc) / 2.0
+            ax.plot(xs, e_saddle, "s", color=color, markersize=9,
+                    markeredgecolor="black", markeredgewidth=1.2, zorder=4)
+            _place_label(_coord_label(s[0], e_saddle), xs, e_saddle)
 
     # Basin markers + labels. A basin is marked iff it is named OR clears the
     # persistence floor.
     n_markers = 0
-    label_parts_axes = [("c", c_pos)]
-    if a4_pos is not None:
-        label_parts_axes.append(("a4", a4_pos))
-    for b in disp:
+    for b in sorted(disp):      # sorted -> deterministic, reproducible label placement
         node = tree.node(b)
         named = b in basin_role
         if not named and not (node.persistence > MERGE_TREE_MARKER_MIN):
@@ -1183,14 +1211,8 @@ def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos, a4_pos,
         # Named criticals are always labeled; other basins only when the panel
         # is under the label cap (the unpruned panel can have 100+ basins).
         if show_labels or named:
-            label = "  ".join(
-                f"{name}={float(axes[name][node.minimum_index[pos]]):.3f}"
-                for name, pos in label_parts_axes
-            )
-            label += f"\nE={node.minimum_energy:.3f}"
-            ax.annotate(label, (x, node.minimum_energy),
-                        textcoords="offset points", xytext=(6, 6),
-                        fontsize=7, zorder=6)
+            _place_label(_coord_label(node.minimum_index, node.minimum_energy),
+                         x, node.minimum_energy)
 
     ax.set_xlim(-1, max(x_of.values()) + 1 if x_of else 1)
     ax.set_xticks([])
