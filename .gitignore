@@ -1,6 +1,7 @@
 /target
 /docs
 /.claude
+/.idea
 *.so
 *.pyd
 *.parquet
