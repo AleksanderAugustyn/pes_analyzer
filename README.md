@@ -15,7 +15,7 @@ Quantum-chemistry calculations produce potential energy surfaces (PES) as dense 
 - **`pes_analyzer.extrema.find_maxima_grid`** — strict dual of `find_minima_grid`. Same stencil and same `neighborhood_range` / `confirm_range` semantics; output sorted descending by energy.
 - **`pes_analyzer.extrema.find_extrema_grid`** — combined single-sweep search. Returns `(minima, maxima)` byte-identical to calling the two single-polarity functions separately, at the cost of one extra-list allocation but one fewer stencil walk per cell.
 - **`pes_analyzer.topology.find_watershed_segmentation`** — full watershed flood: labels every cell by basin and records every basin-merge (saddle) event as a merge tree. The whole-surface generalization of `find_iwf_grid`.
-- **`pes_analyzer.topology`** merge-tree helpers — pure-Python `compute_persistence`, `prune_merge_tree`, and `identify_critical_points` analyse that merge tree. `identify_critical_points` walks the persistence-pruned tree outward from the ground state to label `ground_state`, `secondary_minimum`, `inner_saddle`, `outer_saddle`, and `fission_exit`.
+- **`pes_analyzer.topology`** merge-tree helpers — pure-Python `compute_persistence`, `prune_merge_tree`, and the traversable `MergeTree` (whose nodes are `BasinNode`s) analyse that merge tree. `MergeTree` is physics-free: it exposes neutral traversal, membership, and geometry primitives that a consumer composes with its own predicates to label ground states, saddles, fission exits, etc.
 - **`pes_analyzer.grid.build_dense`** — scatter helper that turns sparse `(coords, value)` rows into a dense `numpy` array indexed in axis order.
 
 ## Installation
@@ -64,7 +64,7 @@ print(find_iwf_grid(energies, start=(0, 0), end=(0, 4)))
 | `topology.find_watershed_segmentation(energies)` | full basin labelling + merge tree | [API.md](./API.md#find_watershed_segmentation) |
 | `topology.compute_persistence(basins, merges)` | per-basin topological persistence | [API.md](./API.md#topology-helpers) |
 | `topology.prune_merge_tree(basins, merges, threshold)` | drop low-persistence basins | [API.md](./API.md#topology-helpers) |
-| `topology.identify_critical_points(basins, merges, threshold, *, gs_disqualifier=None)` | label GS / SM / saddles / fission exit | [API.md](./API.md#topology-helpers) |
+| `topology.MergeTree(labels, basins, merges)` | traversable basin merge tree (physics-free primitives) | [API.md](./API.md#topology-helpers) |
 
 ## Documentation
 

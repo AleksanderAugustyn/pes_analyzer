@@ -381,36 +381,73 @@ Per-basin topological persistence. The deepest basin (`basins[0]`) has persisten
 
 Drops basins whose persistence is strictly less than `threshold`. Returns `(surviving_basin_ids, kept_merges)`. `kept_merges` is the subset of input merges whose `shallower` basin survives; the `deeper` basin always survives too (proof: if a kept merge has `shallower.persistence >= threshold` and `deeper.min_e <= shallower.min_e`, then `deeper.persistence >= shallower.persistence >= threshold`).
 
-### `identify_critical_points(basins, merges, threshold, *, gs_disqualifier=None) -> dict`
+### `MergeTree(labels, basins, merges)`
 
-Walks the pruned merge tree outward from the ground state by Prim-style edge relaxation: at each step, the lowest-saddle-energy edge with one end visited and one end not is consumed. Returns a dict with keys `ground_state`, `secondary_minimum`, `inner_saddle`, `outer_saddle`, `fission_exit`. Each value is either a basin ID, a merge tuple, or `None`.
+Traversable rooted tree over the watershed basins, built directly from the
+`(labels, basins, merges)` triple returned by `find_watershed_segmentation`. One
+node per basin, rooted at the deepest basin (`basins[0]`, id 0). The tree is
+**physics-free**: it knows nothing about ground states, fission, or any domain
+convention — it exposes neutral traversal, membership, and geometry primitives
+that a consumer composes with its own predicates.
 
-Three regimes:
+Public attributes:
 
-| Pruned tree | Result |
+- **`labels`** — the `int32` basin-id array (same shape as the PES grid), kept for membership and edge queries.
+- **`nodes`** — `dict[int, BasinNode]` keyed by basin ID.
+- **`root`** — `int | None`; basin id 0 (the global minimum) when any basin exists, else `None`.
+
+Methods:
+
+| Method | Returns |
 |---|---|
-| Just GS | only `ground_state` is set |
-| GS + 1 outward basin (SHE-typical) | `ground_state`, `inner_saddle` (the one saddle), `fission_exit` set; SM and outer_saddle are `None` |
-| GS + 2+ outward basins (actinide-typical) | all five fields populated |
+| `node(bid)` | the `BasinNode` for basin `bid` |
+| `persistence(bid)` | topological persistence of `bid` (same value as `compute_persistence`) |
+| `neighbors(bid)` | children + parent basin IDs |
+| `path(a, b)` | inclusive tree path from `a` to `b` (through their lowest common ancestor) |
+| `bfs(start, *, advance=None)` | iterator of `(basin_id, depth)`; `advance(from_bid, to_bid) -> bool` gates edge traversal — return `False` to skip that edge and the subtree beyond it |
+| `basin_of_point(index)` | basin ID at grid cell `index` (`-1` for a `NaN` cell) |
+| `basins_containing(points)` | `dict[basin_id, list[index]]` grouping the points by basin (`NaN` cells skipped) |
+| `touches_edge(bid, axis, side='max')` | `True` iff any cell of `bid` lies on the `axis` boundary; `side` is `'min'`, `'max'`, or `'both'` |
 
-The optional `gs_disqualifier` is a `Callable[[int], bool]`; returning `True` marks a basin as ineligible to be the ground state, and the picker falls back to the next-deepest surviving basin. Used by `MapMaker_FoS_SHE.py` to apply the `c <= 1.25` physical constraint.
+### `BasinNode`
+
+Dataclass for a single node in a `MergeTree`. Fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `basin_id` | `int` | basin ID (the `nodes` key) |
+| `minimum_index` | `tuple[int, ...]` | N-D index of the basin minimum |
+| `minimum_energy` | `float` | energy at the minimum |
+| `parent` | `int \| None` | parent basin ID (`None` for the root) |
+| `saddle_to_parent` | `tuple[tuple[int, ...], float] \| None` | `(saddle_index, saddle_energy)` of the merge into the parent (`None` for the root) |
+| `persistence` | `float` | topological persistence (`+inf` for the root) |
+| `children` | `list[int]` | child basin IDs |
 
 ### Example
 
 ```python
 import numpy as np
-from pes_analyzer.topology import (
-    find_watershed_segmentation, identify_critical_points,
-)
+from pes_analyzer.topology import find_watershed_segmentation, MergeTree
 
+# Three basins along a row: minima at columns 0, 4, 8.
 energies = np.array([[0.0, 3.0, 8.0, 4.0, 1.0, 3.0, 5.0, 4.0, 2.0]])
-_, basins, merges = find_watershed_segmentation(energies)
-cp = identify_critical_points(basins, merges, threshold=2.0)
-print(cp["secondary_minimum"])   # 1   (the SM basin id)
-print(cp["fission_exit"])        # 2   (the FE basin id)
-print(cp["inner_saddle"][1])     # 8.0 (inner saddle energy)
-print(cp["outer_saddle"][1])     # 5.0 (outer saddle energy, lower than inner)
+labels, basins, merges = find_watershed_segmentation(energies)
+
+tree = MergeTree(labels, basins, merges)
+print(tree.root)                          # 0 (deepest basin)
+print(tree.node(0).children)              # [1]
+print(tree.node(2).saddle_to_parent)      # ((0, 6), 5.0)
+print(tree.persistence(1))                # 7.0
+print(tree.path(1, 2))                    # [1, 2]
+print(tree.basin_of_point((0, 4)))        # 1
 ```
+
+The deleted `identify_critical_points` helper (a domain-specific labeller for
+ground state / secondary minimum / saddles / fission exit) is no longer part of
+the library. That physics now lives in the consumer:
+`mapmaker_test/MapMaker_FoS_SHE.py` composes these `MergeTree` primitives with
+its own predicates (e.g. the `c <= 1.25` ground-state constraint) — see it for a
+real-world worked example.
 
 ---
 

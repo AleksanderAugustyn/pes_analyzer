@@ -4,11 +4,22 @@ build-backend = "maturin"
 
 [project]
 name = "pes_analyzer"
-version = "0.6.0"
+version = "0.7.0"
 description = "Fast saddle-point analysis on dense N-D PES grids"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [
+    { name = "Aleksander Augustyn", email = "aleksander.augustyn@ncbj.gov.pl" },
+]
+keywords = [
+    "potential-energy-surface",
+    "saddle-point",
+    "watershed",
+    "topology",
+    "fission",
+    "computational-chemistry",
+]
 dependencies = [
     "numpy >= 1.24",
 ]
@@ -19,6 +30,10 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",
 ]
+
+[project.urls]
+Homepage = "https://github.com/AleksanderAugustyn/pes_analyzer"
+Repository = "https://github.com/AleksanderAugustyn/pes_analyzer"
 
 [tool.maturin]
 python-source = "python"
