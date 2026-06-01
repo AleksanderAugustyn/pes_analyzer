@@ -812,6 +812,62 @@ def save_critical_points_csv(critical_points: dict[CriticalPointType, CriticalPo
     return output_file
 
 
+def save_basins_csv(tree: "MergeTree", axes: dict[str, np.ndarray],
+                    nucleus: NucleusInfo, output_dir: str = 'basins',
+                    out: TextIO = sys.stdout) -> Optional[Path]:
+    """Write every basin's minimum coordinates, energy, and persistence."""
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
+
+    axis_names = list(axes)
+    rows = []
+    for bid, node in sorted(tree.nodes.items()):
+        row = {'basin_id': bid}
+        for i, name in enumerate(axis_names):
+            row[name] = float(axes[name][node.minimum_index[i]])
+        row['minimum_energy'] = node.minimum_energy
+        row['persistence'] = node.persistence
+        rows.append(row)
+
+    if not rows:
+        print("    No basins to save", file=out)
+        return None
+
+    df = pl.DataFrame(rows)
+    output_file = output_path / f'{nucleus.isotope_label}_basins.csv'
+    df.write_csv(output_file, float_precision=6)
+    print(f"    Saved {len(rows)} basins to: {output_file}", file=out)
+    return output_file
+
+
+def plot_persistence_histogram(tree: "MergeTree", nucleus: NucleusInfo,
+                               output_filename: str,
+                               out: TextIO = sys.stdout) -> None:
+    """Histogram of finite basin persistences (the root's +inf is excluded)."""
+    persistences = [
+        node.persistence for node in tree.nodes.values()
+        if np.isfinite(node.persistence)
+    ]
+    if not persistences:
+        print("    No finite persistences to plot", file=out)
+        return
+
+    with _PLOT_LOCK:
+        fig = Figure(figsize=(8, 5))
+        ax = fig.add_subplot(1, 1, 1)
+        ax.hist(persistences, bins=min(50, max(10, len(persistences) // 5)),
+                color='steelblue', edgecolor='black')
+        ax.set_xlabel('Persistence (MeV)', fontsize=14)
+        ax.set_ylabel('Basin count', fontsize=14)
+        title = nucleus.isotope_label or Path(output_filename).stem
+        ax.set_title(f'Basin persistence — {title}  (n={len(persistences)})', fontsize=14)
+        ax.set_yscale('log')
+        fig.tight_layout()
+        fig.savefig(output_filename, dpi=DPI, bbox_inches='tight')
+
+    print(f"  Saved persistence histogram: {output_filename}", file=out)
+
+
 def print_analysis_summary(critical_points: dict[CriticalPointType, CriticalPoint],
                            nucleus: NucleusInfo,
                            out: TextIO = sys.stdout):
@@ -1000,6 +1056,11 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
 
     print_analysis_summary(critical_points, nucleus, out=out)
     save_critical_points_csv(critical_points, nucleus, out=out)
+    save_basins_csv(tree, axes, nucleus, out=out)
+    plot_persistence_histogram(
+        tree, nucleus,
+        f'{parquet_file.stem}_persistence_hist.png', out=out,
+    )
 
     output_name = parquet_file.stem
     active_axes = tuple(axes.keys())
