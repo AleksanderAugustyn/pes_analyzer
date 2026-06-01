@@ -51,10 +51,12 @@ import polars as pl
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
 
+from pes_analyzer.extrema  import find_minima_grid
 from pes_analyzer.grid     import build_dense
 from pes_analyzer.topology import (
+    MergeTree,
+    compute_persistence,
     find_watershed_segmentation,
-    identify_critical_points,
 )
 
 # =============================================================================
@@ -94,11 +96,8 @@ PARAMETER_LIMITS = {
 # =============================================================================
 # ANALYSIS THRESHOLDS
 # =============================================================================
-GROUND_STATE_C_THRESHOLD = 1.25
-
-# Persistence threshold for basin survival in the merge-tree pruning step.
-# Single tunable knob for the GS / SM / FE classification.
-PERSISTENCE_THRESHOLD = 0.5    # MeV
+GROUND_STATE_C_THRESHOLD = 1.4   # GS must lie within the normal-shape region (c < this)
+CONFIRM_RANGE = 2                # find_minima_grid confirm_range for genuine minima
 
 
 # =============================================================================
@@ -518,6 +517,85 @@ def _format_coords(idx: tuple[int, ...], axes: dict[str, np.ndarray]) -> str:
     parts = [f"{name}={float(axes[name][idx[i]]):.4f}"
              for i, name in enumerate(axes)]
     return "(" + ", ".join(parts) + ")"
+
+
+def select_fos_critical_points(tree, has_min, c_of, a4_axis):
+    """Identify GS / SM / FE / inner+outer saddle basins from a MergeTree.
+
+    Pure, physics-aware, library-free composition of neutral MergeTree
+    primitives. The library itself encodes none of this.
+
+    Parameters
+    ----------
+    tree
+        A pes_analyzer.topology.MergeTree.
+    has_min : Callable[[int], bool]
+        True iff basin ``bid`` contains a confirmed (range-2) local minimum.
+    c_of : Callable[[int], float]
+        The ``c`` coordinate of basin ``bid``'s minimum.
+    a4_axis : int | None
+        Position of the ``a4`` axis in the grid's axis order, or None if a4
+        is not an active axis.
+
+    Returns
+    -------
+    dict with keys ``ground_state``, ``secondary_minimum``, ``fission_exit``
+    (basin ids or None) and ``inner_saddle``, ``outer_saddle``
+    ((index, energy) tuples or None).
+    """
+    result = {
+        "ground_state": None,
+        "secondary_minimum": None,
+        "fission_exit": None,
+        "inner_saddle": None,
+        "outer_saddle": None,
+    }
+
+    candidates = [
+        bid for bid in tree.nodes
+        if has_min(bid) and c_of(bid) < GROUND_STATE_C_THRESHOLD
+    ]
+    if not candidates:
+        return result
+    gs = min(candidates, key=lambda b: tree.node(b).minimum_energy)
+    result["ground_state"] = gs
+
+    def first_outward(start, extra=None):
+        """Nearest basin (by hops) reachable along non-decreasing-c edges that
+        has a confirmed minimum, strictly larger c than ``start``, and passes
+        the optional ``extra`` predicate."""
+        for bid, _depth in tree.bfs(start, advance=lambda a, b: c_of(b) >= c_of(a)):
+            if bid == start:
+                continue
+            if has_min(bid) and c_of(bid) > c_of(start) and (extra is None or extra(bid)):
+                return bid
+        return None
+
+    def max_saddle(a, b):
+        path = tree.path(a, b)
+        saddles = []
+        for u, v in zip(path, path[1:]):
+            child = v if tree.node(v).parent == u else u
+            s = tree.node(child).saddle_to_parent
+            if s is not None:
+                saddles.append(s)
+        return max(saddles, key=lambda s: s[1]) if saddles else None
+
+    sm = first_outward(gs)
+    result["secondary_minimum"] = sm
+    if sm is None:
+        return result
+    result["inner_saddle"] = max_saddle(gs, sm)
+
+    def touches(bid):
+        return a4_axis is not None and tree.touches_edge(bid, a4_axis, "max")
+
+    fe = first_outward(sm, extra=touches)
+    result["fission_exit"] = fe
+    if fe is not None:
+        result["outer_saddle"] = max_saddle(sm, fe)
+
+    return result
 
 
 def index_to_gridpoint(
