@@ -14,7 +14,6 @@ import pytest
 from pes_analyzer.topology import (
     compute_persistence,
     find_watershed_segmentation,
-    identify_critical_points,
     prune_merge_tree,
 )
 
@@ -89,67 +88,6 @@ def test_prune_drops_low_persistence_basins():
     surviving, kept = prune_merge_tree(basins, merges, threshold=1.0)
     assert surviving == [0, 1, 2]
     assert len(kept) == 2
-
-
-# -------- identify_critical_points -----------------------------------------
-
-
-def test_identify_critical_points_actinide_like():
-    # 4 basins on a 1-D chain (shape 1x15):
-    #   basin A (E=0) at pos 0  — GS
-    #   basin B (E=1) at pos 6  — SM
-    #   basin C (E=3) at pos 12 — FE
-    #   basin D (E=4) at pos 14 — noise (small persistence)
-    # Saddles chosen so B and C have persistence > threshold but D does not.
-    energies = np.array(
-        [[0.0, 3.0, 6.0, 5.0, 4.0, 3.0, 1.0, 3.0, 5.0, 7.0, 6.0, 5.0, 3.0, 4.5, 4.0]]
-    )
-    _labels, basins, merges = find_watershed_segmentation(energies)
-    cp = identify_critical_points(basins, merges, threshold=2.0)
-    assert cp["ground_state"] is not None
-    assert cp["secondary_minimum"] is not None
-    assert cp["inner_saddle"] is not None
-    assert cp["outer_saddle"] is not None
-    assert cp["fission_exit"] is not None
-    # GS is the deepest basin.
-    assert basins[cp["ground_state"]][1] == 0.0
-
-
-def test_identify_critical_points_outer_lower_than_inner():
-    # Linear chain where the outer barrier has LOWER energy than the inner.
-    # positions 0..8 with energies:
-    #   0:0 (GS) 1:3 2:8 (inner saddle) 3:4 4:1 (SM) 5:3 6:5 (outer saddle) 7:4 8:2 (FE)
-    energies = np.array([[0.0, 3.0, 8.0, 4.0, 1.0, 3.0, 5.0, 4.0, 2.0]])
-    _labels, basins, merges = find_watershed_segmentation(energies)
-    cp = identify_critical_points(basins, merges, threshold=2.0)
-    assert cp["ground_state"] == 0           # GS is basin A (E=0)
-    assert cp["secondary_minimum"] == 1      # SM is basin B (E=1), not C (E=2)
-    assert cp["fission_exit"] == 2           # FE is basin C (E=2)
-    assert cp["inner_saddle"][1] == 8.0      # inner saddle energy is 8
-    assert cp["outer_saddle"][1] == 5.0      # outer saddle energy is 5 (LOWER)
-
-
-def test_identify_critical_points_she_like():
-    # Two basins only; no fission isomer. Expect single saddle in
-    # inner_saddle slot and fission_exit pointing at the outward basin.
-    energies = np.array([[0.0, 3.0, 5.0, 3.0, 2.0]])
-    _labels, basins, merges = find_watershed_segmentation(energies)
-    cp = identify_critical_points(basins, merges, threshold=1.0)
-    assert cp["ground_state"] == 0
-    assert cp["secondary_minimum"] is None
-    assert cp["inner_saddle"] is not None
-    assert cp["outer_saddle"] is None
-    assert cp["fission_exit"] is not None
-
-
-def test_gs_disqualifier_falls_back_to_next_basin():
-    # Two basins; pass a disqualifier that rejects basin 0.
-    energies = np.array([[0.0, 5.0, 1.0]])
-    _labels, basins, merges = find_watershed_segmentation(energies)
-    cp = identify_critical_points(
-        basins, merges, threshold=0.0, gs_disqualifier=lambda bid: bid == 0
-    )
-    assert cp["ground_state"] == 1
 
 
 # -------- validation -------------------------------------------------------

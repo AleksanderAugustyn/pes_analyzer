@@ -7,15 +7,12 @@ contract.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
-
 import numpy as np
 import numpy.typing as npt
 
 __all__ = [
     "compute_persistence",
     "prune_merge_tree",
-    "identify_critical_points",
 ]
 
 
@@ -80,88 +77,3 @@ def prune_merge_tree(
     return surviving, kept
 
 
-def identify_critical_points(
-    basins: list[tuple[tuple[int, ...], float]],
-    merges: list[tuple[tuple[int, ...], float, int, int]],
-    threshold: float,
-    *,
-    gs_disqualifier: Optional[Callable[[int], bool]] = None,
-) -> dict[str, object]:
-    """Walk the pruned merge tree outward from the ground state.
-
-    Uses a Prim-style edge relaxation on the (already-a-)tree: at each
-    step, the lowest-saddle-energy edge connecting a visited basin to an
-    unvisited one is consumed. This is **not** equivalent to a linear
-    scan of the pruned merges in saddle-energy order, because the outer
-    barrier may be lower than the inner barrier (which is physically
-    common for actinides).
-
-    Parameters
-    ----------
-    basins, merges
-        Outputs of :func:`find_watershed_segmentation`.
-    threshold
-        Persistence threshold passed to :func:`prune_merge_tree`.
-    gs_disqualifier
-        Optional callable ``basin_id -> bool``. Returning ``True`` marks
-        the basin as ineligible to be the ground state, and the walk
-        falls back to the next-deepest surviving basin. Used by callers
-        that need to apply a physical constraint such as "GS must lie
-        within the normal-shape region."
-
-    Returns
-    -------
-    A dict with keys ``ground_state``, ``secondary_minimum``,
-    ``inner_saddle``, ``outer_saddle``, ``fission_exit``. Each value is
-    either a basin ID (``int``) / merge tuple, or ``None`` if the
-    pruned topology does not contain that critical point.
-    """
-    surviving, kept = prune_merge_tree(basins, merges, threshold)
-
-    gs: Optional[int] = None
-    for bid in surviving:
-        if gs_disqualifier is None or not gs_disqualifier(bid):
-            gs = bid
-            break
-
-    result: dict[str, object] = {
-        "ground_state": gs,
-        "secondary_minimum": None,
-        "inner_saddle": None,
-        "outer_saddle": None,
-        "fission_exit": None,
-    }
-    if gs is None:
-        return result
-
-    visited = {gs}
-    remaining = list(kept)
-    steps: list[tuple[tuple[tuple[int, ...], float, int, int], int]] = []
-    while len(steps) < 2:
-        active = [
-            (i, m)
-            for i, m in enumerate(remaining)
-            if (m[2] in visited) ^ (m[3] in visited)
-        ]
-        if not active:
-            break
-        i, m = min(active, key=lambda im: im[1][1])
-        new = m[3] if m[2] in visited else m[2]
-        steps.append((m, new))
-        visited.add(new)
-        remaining.pop(i)
-
-    if len(steps) == 1:
-        # SHE-like: single outward basin; report the saddle in the
-        # inner_saddle slot for downstream-schema compatibility.
-        m, new = steps[0]
-        result["inner_saddle"] = m
-        result["fission_exit"] = new
-    elif len(steps) == 2:
-        (m1, new1), (m2, new2) = steps
-        result["inner_saddle"] = m1
-        result["secondary_minimum"] = new1
-        result["outer_saddle"] = m2
-        result["fission_exit"] = new2
-
-    return result

@@ -1,10 +1,9 @@
-"""pes_analyzer.topology: full watershed segmentation and
-persistence-pruned basin selection.
+"""pes_analyzer.topology: watershed segmentation and merge-tree analysis.
 
 The Rust-backed kernel ``find_watershed_segmentation`` is re-exported from
-``pes_analyzer._native.topology``; the merge-tree analysis helpers
-(``compute_persistence``, ``prune_merge_tree``, ``identify_critical_points``)
-live in ``_tree.py`` and are pure Python.
+``pes_analyzer._native.topology``; the pure-Python analysis layer provides
+``compute_persistence`` / ``prune_merge_tree`` (in ``_tree.py``) and the
+traversable ``MergeTree`` (in ``merge_tree.py``).
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ from pes_analyzer._native import topology as _native_topology
 
 from ._tree import (
     compute_persistence,
-    identify_critical_points,
     prune_merge_tree,
 )
 from .merge_tree import BasinNode, MergeTree
@@ -28,7 +26,6 @@ __all__ = [
     "find_watershed_segmentation",
     "compute_persistence",
     "prune_merge_tree",
-    "identify_critical_points",
-    "BasinNode",
     "MergeTree",
+    "BasinNode",
 ]
