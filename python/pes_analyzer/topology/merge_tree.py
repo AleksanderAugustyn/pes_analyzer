@@ -78,3 +78,53 @@ class MergeTree:
     def persistence(self, bid: int) -> float:
         """Return the topological persistence of basin ``bid``."""
         return self.nodes[bid].persistence
+
+    # -- traversal ----------------------------------------------------------
+
+    def neighbors(self, bid: int) -> list[int]:
+        n = self.nodes[bid]
+        out = list(n.children)
+        if n.parent is not None:
+            out.append(n.parent)
+        return out
+
+    def path(self, a: int, b: int) -> list[int]:
+        """Inclusive tree path from ``a`` to ``b``."""
+        chain_a: list[int] = []
+        x: Optional[int] = a
+        while x is not None:
+            chain_a.append(x)
+            x = self.nodes[x].parent
+        index_in_a = {node: i for i, node in enumerate(chain_a)}
+
+        up_from_b: list[int] = []
+        x = b
+        while x not in index_in_a:
+            up_from_b.append(x)
+            x = self.nodes[x].parent
+        lca = x
+        return chain_a[: index_in_a[lca] + 1] + list(reversed(up_from_b))
+
+    def bfs(
+        self,
+        start: int,
+        *,
+        advance: Optional[Callable[[int, int], bool]] = None,
+    ) -> Iterator[tuple[int, int]]:
+        """Breadth-first walk from ``start`` yielding ``(basin_id, depth)``.
+
+        ``advance(from_bid, to_bid) -> bool`` gates edge traversal; when it
+        returns ``False`` the edge (and the subtree beyond it) is skipped.
+        """
+        seen = {start}
+        queue: deque[tuple[int, int]] = deque([(start, 0)])
+        while queue:
+            bid, depth = queue.popleft()
+            yield bid, depth
+            for nb in self.neighbors(bid):
+                if nb in seen:
+                    continue
+                if advance is not None and not advance(bid, nb):
+                    continue
+                seen.add(nb)
+                queue.append((nb, depth + 1))

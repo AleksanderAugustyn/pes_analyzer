@@ -66,3 +66,36 @@ def test_empty_tree_is_graceful():
     tree = MergeTree(labels, [], [])
     assert tree.root is None
     assert dict(tree.nodes) == {}
+
+
+def test_neighbors():
+    labels, basins, merges = _actinide_chain()
+    tree = MergeTree(labels, basins, merges)
+    assert sorted(tree.neighbors(0)) == [1]        # root: child only
+    assert sorted(tree.neighbors(1)) == [0, 2]     # parent + child
+    assert sorted(tree.neighbors(2)) == [1]        # leaf: parent only
+
+
+def test_path():
+    labels, basins, merges = _actinide_chain()
+    tree = MergeTree(labels, basins, merges)
+    assert tree.path(0, 0) == [0]
+    assert tree.path(0, 2) == [0, 1, 2]
+    assert tree.path(2, 0) == [2, 1, 0]
+    assert tree.path(1, 2) == [1, 2]
+
+
+def test_bfs_hop_order_and_advance():
+    labels, basins, merges = _actinide_chain()
+    tree = MergeTree(labels, basins, merges)
+    # full bfs from leaf reaches every node, increasing depth
+    order = list(tree.bfs(2))
+    assert order[0] == (2, 0)
+    assert {bid for bid, _ in order} == {0, 1, 2}
+    assert dict(order)[0] == 2  # basin 0 is two hops from leaf 2
+
+    # advance gate: only walk toward strictly-larger basin id
+    seen = [bid for bid, _ in tree.bfs(0, advance=lambda a, b: b > a)]
+    assert seen == [0, 1, 2]
+    # advance gate blocking everything yields only the start
+    assert [bid for bid, _ in tree.bfs(1, advance=lambda a, b: False)] == [1]
