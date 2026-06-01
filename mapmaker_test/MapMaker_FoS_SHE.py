@@ -807,6 +807,7 @@ def run_critical_point_analysis_nd(
     dict[str, float],
     dict[str, np.ndarray],
     "MergeTree",
+    dict,
 ]:
     """Dimension-agnostic PES topology analysis + FoS physics layer.
 
@@ -934,7 +935,7 @@ def run_critical_point_analysis_nd(
 
     print(f"\n  [time] Total critical point analysis: "
           f"{time.perf_counter() - t_total:.2f} s", file=out)
-    return critical_points, energies, axes, inactive_axes, components, tree
+    return critical_points, energies, axes, inactive_axes, components, tree, sel
 
 
 # =============================================================================
@@ -1179,7 +1180,9 @@ def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos, a4_pos,
                 markeredgecolor="black", markeredgewidth=1.2, zorder=5)
         n_markers += 1
 
-        if show_labels:
+        # Named criticals are always labeled; other basins only when the panel
+        # is under the label cap (the unpruned panel can have 100+ basins).
+        if show_labels or named:
             label = "  ".join(
                 f"{name}={float(axes[name][node.minimum_index[pos]]):.3f}"
                 for name, pos in label_parts_axes
@@ -1442,7 +1445,7 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
 
     df = read_parquet_file(parquet_file, out=out)
 
-    critical_points, energies, axes, inactive_axes, components, tree = \
+    critical_points, energies, axes, inactive_axes, components, tree, sel = \
         run_critical_point_analysis_nd(df, out=out)
 
     print_analysis_summary(critical_points, nucleus, out=out)
@@ -1451,6 +1454,10 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
     plot_persistence_histogram(
         tree, nucleus,
         f'{parquet_file.stem}_persistence_hist.png', out=out,
+    )
+    plot_merge_tree(
+        tree, sel, axes, nucleus,
+        f'{parquet_file.stem}_merge_tree.png', out=out,
     )
 
     output_name = parquet_file.stem
