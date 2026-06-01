@@ -128,3 +128,37 @@ class MergeTree:
                     continue
                 seen.add(nb)
                 queue.append((nb, depth + 1))
+
+    # -- membership & geometry ---------------------------------------------
+
+    def basin_of_point(self, index: tuple[int, ...]) -> int:
+        """Return the basin ID at grid cell ``index`` (-1 for a NaN cell)."""
+        return int(self.labels[tuple(index)])
+
+    def basins_containing(
+        self, points: list[tuple[int, ...]]
+    ) -> dict[int, list[tuple[int, ...]]]:
+        """Group index-tuples by the basin each lands in. NaN cells (-1) skipped."""
+        out: dict[int, list[tuple[int, ...]]] = {}
+        for p in points:
+            bid = int(self.labels[tuple(p)])
+            if bid < 0:
+                continue
+            out.setdefault(bid, []).append(p)
+        return out
+
+    def touches_edge(self, bid: int, axis: int, side: str = "max") -> bool:
+        """True iff any cell of basin ``bid`` lies on the ``axis`` boundary.
+
+        ``side`` is ``'min'`` (index 0), ``'max'`` (index shape[axis]-1), or
+        ``'both'``.
+        """
+        mask = self.labels == bid
+        last = self.labels.shape[axis] - 1
+        if side == "min":
+            return bool(np.take(mask, 0, axis=axis).any())
+        if side == "max":
+            return bool(np.take(mask, last, axis=axis).any())
+        if side == "both":
+            return bool(np.take(mask, 0, axis=axis).any() or np.take(mask, last, axis=axis).any())
+        raise ValueError("side must be 'min', 'max', or 'both'")

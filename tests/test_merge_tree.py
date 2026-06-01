@@ -99,3 +99,38 @@ def test_bfs_hop_order_and_advance():
     assert seen == [0, 1, 2]
     # advance gate blocking everything yields only the start
     assert [bid for bid, _ in tree.bfs(1, advance=lambda a, b: False)] == [1]
+
+
+def test_basin_of_point():
+    labels, basins, merges = _actinide_chain()
+    tree = MergeTree(labels, basins, merges)
+    assert tree.basin_of_point((0, 0)) == 0
+    assert tree.basin_of_point((2, 2)) == 1
+    assert tree.basin_of_point((4, 4)) == 2
+
+
+def test_basins_containing_groups_points_and_skips_nan():
+    labels, basins, merges = _actinide_chain()
+    labels = labels.copy()
+    labels[0, 4] = -1  # a NaN cell
+    tree = MergeTree(labels, basins, merges)
+    grouped = tree.basins_containing([(0, 0), (1, 0), (2, 2), (4, 4), (0, 4)])
+    assert sorted(grouped.keys()) == [0, 1, 2]
+    assert (0, 0) in grouped[0] and (1, 0) in grouped[0]
+    assert grouped[1] == [(2, 2)]
+    assert grouped[2] == [(4, 4)]  # (0,4) had label -1 -> skipped
+
+
+def test_touches_edge():
+    labels, basins, merges = _actinide_chain()
+    tree = MergeTree(labels, basins, merges)
+    # basin 2 occupies column 4 == shape[1]-1 (axis-1 max edge)
+    assert tree.touches_edge(2, axis=1, side="max") is True
+    assert tree.touches_edge(2, axis=1, side="min") is False
+    # basin 0 occupies column 0 (axis-1 min edge), not the max
+    assert tree.touches_edge(0, axis=1, side="min") is True
+    assert tree.touches_edge(0, axis=1, side="max") is False
+    # basin 1 (columns 2..3) touches neither axis-1 edge
+    assert tree.touches_edge(1, axis=1, side="both") is False
+    with pytest.raises(ValueError, match="side must be"):
+        tree.touches_edge(0, axis=0, side="bogus")
