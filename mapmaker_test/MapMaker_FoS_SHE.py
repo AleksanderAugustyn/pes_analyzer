@@ -99,6 +99,8 @@ PARAMETER_LIMITS = {
 GROUND_STATE_C_THRESHOLD = 1.4   # GS must lie within the normal-shape region (c < this)
 GS_SM_CONFIRM_RANGE = 2   # range-2 confirmation for ground state / secondary minimum
 FE_CONFIRM_RANGE = 1      # looser range-1 confirmation for the fission-exit shoulder minimum
+SM_PERSISTENCE = 0.4          # min persistence (MeV) for the secondary minimum (noise floor)
+THIRD_MIN_PERSISTENCE = 0.4   # min persistence (MeV) for a third minimum to count (noise floor)
 
 
 # =============================================================================
@@ -109,8 +111,10 @@ class CriticalPointType(Enum):
     """Types of critical points on a potential energy surface."""
     GROUND_STATE = auto()
     SECONDARY_MINIMUM = auto()
+    THIRD_MINIMUM = auto()
     FIRST_SADDLE = auto()
     SECOND_SADDLE = auto()
+    THIRD_SADDLE = auto()
     FISSION_EXIT = auto()
 
 
@@ -520,7 +524,32 @@ def _format_coords(idx: tuple[int, ...], axes: dict[str, np.ndarray]) -> str:
     return "(" + ", ".join(parts) + ")"
 
 
-def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
+def _print_minima_list(label: str,
+                       minima: list[tuple[tuple[int, ...], float]],
+                       axes: dict[str, np.ndarray],
+                       shape: tuple[int, ...],
+                       out: TextIO = sys.stdout) -> None:
+    """List every local minimum: coords, energy, and c/a4 max-edge flags.
+
+    Minima arrive sorted ascending by energy from ``find_minima_grid``. The
+    ``c@max`` / ``a4@max`` flags mark cells sitting on the elongation / a4
+    grid wall — i.e. the fission-exit and scission candidates.
+    """
+    axis_names = list(axes)
+    c_pos = axis_names.index('c') if 'c' in axis_names else None
+    a4_pos = axis_names.index('a4') if 'a4' in axis_names else None
+    print(f"    {label} (n={len(minima)}):", file=out)
+    for idx, energy in minima:
+        flags = []
+        if c_pos is not None and idx[c_pos] == shape[c_pos] - 1:
+            flags.append("c@max")
+        if a4_pos is not None and idx[a4_pos] == shape[a4_pos] - 1:
+            flags.append("a4@max")
+        flag_str = f"  [{', '.join(flags)}]" if flags else ""
+        print(f"      {_format_coords(idx, axes)}  E={energy:>9.4f}{flag_str}", file=out)
+
+
+def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=None):
     """Identify GS / SM / FE / inner+outer saddle basins from a MergeTree.
 
     Pure, physics-aware, library-free composition of neutral MergeTree
@@ -528,14 +557,32 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
 
     Selection rule. The ground state is the deepest basin with a confirmed
     minimum inside the normal-shape region (c < GROUND_STATE_C_THRESHOLD).
-    The secondary minimum and fission exit are found by an *easiest-barrier*
-    search outward: among all tree-reachable basins with c strictly greater
-    than the reference (and the relevant membership / edge predicates), the
-    one whose merge-tree path from the reference has the LOWEST maximum saddle
-    is chosen. The path direction is unconstrained -- it normally dips through
-    the deeper, lower-c ground-state valley before rising to a sibling basin,
-    which is the natural merge-tree topology and exactly why a per-edge
-    monotone-c walk fails here.
+    The secondary minimum is the deepest (lowest-energy) *interior* basin more
+    elongated than the ground state: among confirmed-minimum basins with c
+    strictly greater than the GS, persistence above SM_PERSISTENCE (a noise
+    floor, so a dimple beside the GS cannot win) and finite (not the tree
+    root), and no cell on the c-max or a4-max grid wall, the one with the
+    lowest minimum energy is chosen. The floor plus interior test isolate a
+    genuine well from both shallow noise and the deep scission valley the box
+    clips at its c-max / a4-max corner. Selecting by depth rather than
+    persistence stays robust when the fission isomer is shallow (light Th) and
+    mirrors the ground-state rule. The inner saddle is the highest saddle on
+    the merge-tree path from the GS to the secondary minimum.
+
+    The fission exit is found by an *easiest-barrier* search outward from the
+    secondary minimum: among tree basins with c strictly greater whose own
+    minimum sits on the a4-max edge, the one whose merge-tree path has the
+    LOWEST maximum saddle is chosen; that saddle is the outer saddle. The path direction is
+    unconstrained -- it normally dips through the deeper ground-state valley
+    before rising to a sibling basin, which is the natural merge-tree topology.
+
+    The third minimum is the most persistent *interior-by-minimum* basin lying
+    between the secondary minimum and the fission exit in c, with persistence
+    above THIRD_MIN_PERSISTENCE and energy below the outer saddle -- a genuine
+    well on the fission-valley floor rather than a high-energy side pocket or
+    shallow noise basin. It emerges from these neutral predicates; it is never
+    sought directly. When present it splits the SM->exit barrier: the outer
+    saddle then bounds SM<->3rd and the third saddle bounds 3rd<->exit.
 
     Parameters
     ----------
@@ -546,6 +593,9 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
         the ground state and secondary minimum).
     c_of : Callable[[int], float]
         The ``c`` coordinate of basin ``bid``'s minimum.
+    c_axis : int
+        Position of the ``c`` axis in the grid's axis order; used to reject
+        secondary-minimum candidates touching the c-max grid wall.
     a4_axis : int | None
         Position of the ``a4`` axis in the grid's axis order, or None if a4
         is not an active axis (then no basin can satisfy the edge test).
@@ -555,9 +605,9 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
 
     Returns
     -------
-    dict with keys ``ground_state``, ``secondary_minimum``, ``fission_exit``
-    (basin ids or None) and ``inner_saddle``, ``outer_saddle``
-    ((index, energy) tuples or None).
+    dict with keys ``ground_state``, ``secondary_minimum``, ``third_minimum``,
+    ``fission_exit`` (basin ids or None) and ``inner_saddle``, ``outer_saddle``,
+    ``third_saddle`` ((index, energy) tuples or None).
     """
     if has_min_fe is None:
         has_min_fe = has_min
@@ -565,9 +615,11 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
     result = {
         "ground_state": None,
         "secondary_minimum": None,
+        "third_minimum": None,
         "fission_exit": None,
         "inner_saddle": None,
         "outer_saddle": None,
+        "third_saddle": None,
     }
 
     candidates = [
@@ -614,21 +666,84 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
             return None
         return best[1], best[2]
 
-    sm_pick = lowest_barrier_outward(gs, has_min)
-    if sm_pick is None:
+    def is_interior(bid):
+        """True iff basin ``bid`` keeps clear of the c-max and a4-max walls."""
+        if tree.touches_edge(bid, c_axis, "max"):
+            return False
+        if a4_axis is not None and tree.touches_edge(bid, a4_axis, "max"):
+            return False
+        return True
+
+    # The secondary minimum (fission isomer) is the deepest interior well more
+    # elongated than the GS, above a persistence noise floor. Depth (not
+    # persistence) stays robust when the isomer is shallow; the floor stops a
+    # dimple beside the GS from winning; the interior test excludes scission.
+    sm_candidates = [
+        bid for bid in tree.nodes
+        if bid != gs
+        and has_min(bid)
+        and c_of(bid) > c_of(gs)
+        and tree.node(bid).persistence > SM_PERSISTENCE
+        and np.isfinite(tree.node(bid).persistence)
+        and is_interior(bid)
+    ]
+    if not sm_candidates:
         return result
-    sm, inner = sm_pick
+    sm = min(sm_candidates, key=lambda b: tree.node(b).minimum_energy)
     result["secondary_minimum"] = sm
-    result["inner_saddle"] = inner
+    result["inner_saddle"] = max_saddle(gs, sm)
 
-    def touches(bid):
-        return a4_axis is not None and tree.touches_edge(bid, a4_axis, "max")
+    def min_at_a4_edge(bid):
+        """True iff basin ``bid``'s own minimum sits on the a4-max wall.
 
-    fe_pick = lowest_barrier_outward(sm, has_min_fe, extra=touches)
-    if fe_pick is not None:
-        fe, outer = fe_pick
-        result["fission_exit"] = fe
-        result["outer_saddle"] = outer
+        A genuine fission exit bottoms out against the box wall because the
+        surface still runs downhill there; a basin that merely *touches* the
+        wall (e.g. a third minimum whose well is interior) does not qualify.
+        """
+        if a4_axis is None:
+            return False
+        last = tree.labels.shape[a4_axis] - 1
+        return tree.node(bid).minimum_index[a4_axis] == last
+
+    fe_pick = lowest_barrier_outward(sm, has_min_fe, extra=min_at_a4_edge)
+    if fe_pick is None:
+        return result
+    fe, outer = fe_pick
+    result["fission_exit"] = fe
+    result["outer_saddle"] = outer
+
+    # Third minimum: a genuine well on the fission-valley floor between the
+    # secondary minimum and the exit. It must be deep (persistence) AND low
+    # (below the outer saddle); a high-energy side pocket or noise basin fails
+    # one of those and so never emerges.
+    c_last = tree.labels.shape[c_axis] - 1
+    a4_last = tree.labels.shape[a4_axis] - 1 if a4_axis is not None else None
+
+    def interior_minimum(bid):
+        """True iff basin ``bid``'s own minimum is off the c-max / a4-max walls."""
+        idx = tree.node(bid).minimum_index
+        if idx[c_axis] == c_last:
+            return False
+        if a4_axis is not None and idx[a4_axis] == a4_last:
+            return False
+        return True
+
+    c_sm, c_fe, e_outer = c_of(sm), c_of(fe), outer[1]
+    tm_candidates = [
+        bid for bid in tree.nodes
+        if np.isfinite(tree.node(bid).persistence)
+        and tree.node(bid).persistence > THIRD_MIN_PERSISTENCE
+        and c_sm < c_of(bid) < c_fe
+        and tree.node(bid).minimum_energy < e_outer
+        and interior_minimum(bid)
+    ]
+    if tm_candidates:
+        tm = max(tm_candidates, key=lambda b: tree.node(b).persistence)
+        result["third_minimum"] = tm
+        # Split the SM->exit barrier: the outer saddle bounds SM<->3rd and the
+        # third saddle bounds 3rd<->exit.
+        result["outer_saddle"] = max_saddle(sm, tm)
+        result["third_saddle"] = max_saddle(tm, fe)
 
     return result
 
@@ -716,6 +831,11 @@ def run_critical_point_analysis_nd(
           f"r{FE_CONFIRM_RANGE}={len(minima_fe)} (FE)", file=out)
     print(f"  [time] Step 1 (minima): {time.perf_counter() - t0:.2f} s", file=out)
 
+    _print_minima_list(f"Local minima r{FE_CONFIRM_RANGE} (FE)",
+                       minima_fe, axes, energies.shape, out=out)
+    _print_minima_list(f"Local minima r{GS_SM_CONFIRM_RANGE} (GS/SM)",
+                       minima_gs_sm, axes, energies.shape, out=out)
+
     print("\n  Step 2: Watershed segmentation + merge tree (no pruning)", file=out)
     t0 = time.perf_counter()
     labels, basins, merges = find_watershed_segmentation(energies)
@@ -744,7 +864,7 @@ def run_critical_point_analysis_nd(
     def c_of(bid: int) -> float:
         return float(axes['c'][tree.node(bid).minimum_index[c_pos]])
 
-    sel = select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=has_min_fe)
+    sel = select_fos_critical_points(tree, has_min, c_of, c_pos, a4_axis, has_min_fe=has_min_fe)
     print(f"  [time] Step 3 (identification): {time.perf_counter() - t0:.2f} s", file=out)
 
     def _basin_gp(bid):
@@ -760,9 +880,11 @@ def run_critical_point_analysis_nd(
 
     gs_idx,    gs_e    = _basin_gp (sel["ground_state"])
     sm_idx,    sm_e    = _basin_gp (sel["secondary_minimum"])
+    tm_idx,    tm_e    = _basin_gp (sel["third_minimum"])
     fe_idx,    fe_e    = _basin_gp (sel["fission_exit"])
     inner_idx, inner_e = _saddle_gp(sel["inner_saddle"])
     outer_idx, outer_e = _saddle_gp(sel["outer_saddle"])
+    third_idx, third_e = _saddle_gp(sel["third_saddle"])
 
     if gs_idx is not None:
         print(f"    ✓ Ground State      at idx={gs_idx} {_format_coords(gs_idx, axes)}, E = {gs_e:.4f} MeV", file=out)
@@ -772,10 +894,16 @@ def run_critical_point_analysis_nd(
         print(f"    ✓ Secondary Minimum at idx={sm_idx} {_format_coords(sm_idx, axes)}, E = {sm_e:.4f} MeV", file=out)
     else:
         print("    - Secondary Minimum: none found.", file=out)
+    if tm_idx is not None:
+        print(f"    ✓ Third Minimum     at idx={tm_idx} {_format_coords(tm_idx, axes)}, E = {tm_e:.4f} MeV", file=out)
+    else:
+        print("    - Third Minimum: none found.", file=out)
     if inner_idx is not None:
         print(f"    ✓ Inner Saddle      at idx={inner_idx} {_format_coords(inner_idx, axes)}, E = {inner_e:.4f} MeV", file=out)
     if outer_idx is not None:
         print(f"    ✓ Outer Saddle      at idx={outer_idx} {_format_coords(outer_idx, axes)}, E = {outer_e:.4f} MeV", file=out)
+    if third_idx is not None:
+        print(f"    ✓ Third Saddle      at idx={third_idx} {_format_coords(third_idx, axes)}, E = {third_e:.4f} MeV", file=out)
     if fe_idx is not None:
         print(f"    ✓ Fission Exit      at idx={fe_idx} {_format_coords(fe_idx, axes)}, E = {fe_e:.4f} MeV", file=out)
     else:
@@ -792,9 +920,11 @@ def run_critical_point_analysis_nd(
     critical_points = {
         CriticalPointType.GROUND_STATE:      _to_cp(CriticalPointType.GROUND_STATE,      "Ground State",      gs_idx,    gs_e),
         CriticalPointType.SECONDARY_MINIMUM: _to_cp(CriticalPointType.SECONDARY_MINIMUM, "Secondary Minimum", sm_idx,    sm_e),
+        CriticalPointType.THIRD_MINIMUM:     _to_cp(CriticalPointType.THIRD_MINIMUM,     "Third Minimum",     tm_idx,    tm_e),
         CriticalPointType.FISSION_EXIT:      _to_cp(CriticalPointType.FISSION_EXIT,      "Fission Exit",      fe_idx,    fe_e),
         CriticalPointType.FIRST_SADDLE:      _to_cp(CriticalPointType.FIRST_SADDLE,      "Inner Saddle",      inner_idx, inner_e),
         CriticalPointType.SECOND_SADDLE:     _to_cp(CriticalPointType.SECOND_SADDLE,     "Outer Saddle",      outer_idx, outer_e),
+        CriticalPointType.THIRD_SADDLE:      _to_cp(CriticalPointType.THIRD_SADDLE,      "Third Saddle",      third_idx, third_e),
     }
 
     print(f"\n  [time] Total critical point analysis: "
@@ -1017,6 +1147,8 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
                 CriticalPointType.FIRST_SADDLE: ('s', 'lime', 8, 'Inner Saddle'),
                 CriticalPointType.SECONDARY_MINIMUM: ('o', 'red', 10, 'Secondary Minimum'),
                 CriticalPointType.SECOND_SADDLE: ('s', 'red', 8, 'Outer Saddle'),
+                CriticalPointType.THIRD_MINIMUM: ('o', 'orange', 10, 'Third Minimum'),
+                CriticalPointType.THIRD_SADDLE: ('s', 'orange', 8, 'Third Saddle'),
                 CriticalPointType.FISSION_EXIT: ('o', 'white', 10, 'Fission Exit'),
             }
 
