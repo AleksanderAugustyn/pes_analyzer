@@ -91,3 +91,23 @@ def test_select_returns_none_when_no_edge_basin():
     )
     assert sel["secondary_minimum"] == 2
     assert sel["fission_exit"] is None            # no a4 axis -> nothing touches the edge
+
+
+def test_select_fe_uses_separate_membership():
+    mm = _load_mapmaker()
+    tree = _chain_tree()
+    c_vals = {0: 1.0, 1: 1.2, 2: 1.3, 3: 1.8}
+    # range-2 membership: basin 3 (the edge basin) is NOT a confirmed r2 min
+    has_r2 = {0: True, 1: False, 2: True, 3: False}
+    # range-1 membership: basin 3 IS an r1 min
+    has_r1 = {0: True, 1: False, 2: True, 3: True}
+    sel = mm.select_fos_critical_points(
+        tree,
+        has_min=lambda b: has_r2[b],
+        c_of=lambda b: c_vals[b],
+        a4_axis=1,
+        has_min_fe=lambda b: has_r1[b],
+    )
+    assert sel["ground_state"] == 0
+    assert sel["secondary_minimum"] == 2     # found via r2 membership
+    assert sel["fission_exit"] == 3          # found ONLY via the looser r1 membership

@@ -97,7 +97,8 @@ PARAMETER_LIMITS = {
 # ANALYSIS THRESHOLDS
 # =============================================================================
 GROUND_STATE_C_THRESHOLD = 1.4   # GS must lie within the normal-shape region (c < this)
-CONFIRM_RANGE = 2                # find_minima_grid confirm_range for genuine minima
+GS_SM_CONFIRM_RANGE = 2   # range-2 confirmation for ground state / secondary minimum
+FE_CONFIRM_RANGE = 1      # looser range-1 confirmation for the fission-exit shoulder minimum
 
 
 # =============================================================================
@@ -519,7 +520,7 @@ def _format_coords(idx: tuple[int, ...], axes: dict[str, np.ndarray]) -> str:
     return "(" + ", ".join(parts) + ")"
 
 
-def select_fos_critical_points(tree, has_min, c_of, a4_axis):
+def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
     """Identify GS / SM / FE / inner+outer saddle basins from a MergeTree.
 
     Pure, physics-aware, library-free composition of neutral MergeTree
@@ -530,12 +531,16 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis):
     tree
         A pes_analyzer.topology.MergeTree.
     has_min : Callable[[int], bool]
-        True iff basin ``bid`` contains a confirmed (range-2) local minimum.
+        True iff basin ``bid`` contains a confirmed local minimum.
+        Used for GS and SM selection.
     c_of : Callable[[int], float]
         The ``c`` coordinate of basin ``bid``'s minimum.
     a4_axis : int | None
         Position of the ``a4`` axis in the grid's axis order, or None if a4
         is not an active axis.
+    has_min_fe : Callable[[int], bool] | None
+        Membership test for the fission-exit search; defaults to ``has_min``.
+        Lets the FE use a looser confirmation than GS/SM.
 
     Returns
     -------
@@ -543,6 +548,9 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis):
     (basin ids or None) and ``inner_saddle``, ``outer_saddle``
     ((index, energy) tuples or None).
     """
+    if has_min_fe is None:
+        has_min_fe = has_min
+
     result = {
         "ground_state": None,
         "secondary_minimum": None,
@@ -560,14 +568,14 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis):
     gs = min(candidates, key=lambda b: tree.node(b).minimum_energy)
     result["ground_state"] = gs
 
-    def first_outward(start, extra=None):
+    def first_outward(start, member, extra=None):
         """Nearest basin (by hops) reachable along non-decreasing-c edges that
-        has a confirmed minimum, strictly larger c than ``start``, and passes
-        the optional ``extra`` predicate."""
+        passes ``member``, has strictly larger c than ``start``, and passes the
+        optional ``extra`` predicate."""
         for bid, _depth in tree.bfs(start, advance=lambda a, b: c_of(b) >= c_of(a)):
             if bid == start:
                 continue
-            if has_min(bid) and c_of(bid) > c_of(start) and (extra is None or extra(bid)):
+            if member(bid) and c_of(bid) > c_of(start) and (extra is None or extra(bid)):
                 return bid
         return None
 
@@ -581,7 +589,7 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis):
                 saddles.append(s)
         return max(saddles, key=lambda s: s[1]) if saddles else None
 
-    sm = first_outward(gs)
+    sm = first_outward(gs, has_min)
     result["secondary_minimum"] = sm
     if sm is None:
         return result
@@ -590,7 +598,7 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis):
     def touches(bid):
         return a4_axis is not None and tree.touches_edge(bid, a4_axis, "max")
 
-    fe = first_outward(sm, extra=touches)
+    fe = first_outward(sm, has_min_fe, extra=touches)
     result["fission_exit"] = fe
     if fe is not None:
         result["outer_saddle"] = max_saddle(sm, fe)
@@ -675,8 +683,10 @@ def run_critical_point_analysis_nd(
 
     print("\n  Step 1: Confirmed local minima (range-2)", file=out)
     t0 = time.perf_counter()
-    minima = find_minima_grid(energies, neighborhood_range=1, confirm_range=CONFIRM_RANGE)
-    print(f"    Confirmed minima: {len(minima)}", file=out)
+    minima_gs_sm = find_minima_grid(energies, neighborhood_range=1, confirm_range=GS_SM_CONFIRM_RANGE)
+    minima_fe = find_minima_grid(energies, neighborhood_range=1, confirm_range=FE_CONFIRM_RANGE)
+    print(f"    Confirmed minima: r{GS_SM_CONFIRM_RANGE}={len(minima_gs_sm)} (GS/SM), "
+          f"r{FE_CONFIRM_RANGE}={len(minima_fe)} (FE)", file=out)
     print(f"  [time] Step 1 (minima): {time.perf_counter() - t0:.2f} s", file=out)
 
     print("\n  Step 2: Watershed segmentation + merge tree (no pruning)", file=out)
@@ -693,17 +703,21 @@ def run_critical_point_analysis_nd(
     c_pos = list(axes).index('c')
     a4_axis = list(axes).index('a4') if 'a4' in axes else None
 
-    min_indices = [idx for idx, _e in minima]
-    min_basins = tree.basins_containing(min_indices)
-    print(f"    Basins containing a confirmed minimum: {len(min_basins)}", file=out)
+    min_basins_gs_sm = tree.basins_containing([idx for idx, _e in minima_gs_sm])
+    min_basins_fe = tree.basins_containing([idx for idx, _e in minima_fe])
+    print(f"    Basins with a confirmed minimum: r{GS_SM_CONFIRM_RANGE}={len(min_basins_gs_sm)} (GS/SM), "
+          f"r{FE_CONFIRM_RANGE}={len(min_basins_fe)} (FE)", file=out)
 
     def has_min(bid: int) -> bool:
-        return bid in min_basins
+        return bid in min_basins_gs_sm
+
+    def has_min_fe(bid: int) -> bool:
+        return bid in min_basins_fe
 
     def c_of(bid: int) -> float:
         return float(axes['c'][tree.node(bid).minimum_index[c_pos]])
 
-    sel = select_fos_critical_points(tree, has_min, c_of, a4_axis)
+    sel = select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=has_min_fe)
     print(f"  [time] Step 3 (identification): {time.perf_counter() - t0:.2f} s", file=out)
 
     def _basin_gp(bid):
