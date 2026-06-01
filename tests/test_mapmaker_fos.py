@@ -111,3 +111,37 @@ def test_select_fe_uses_separate_membership():
     assert sel["ground_state"] == 0
     assert sel["secondary_minimum"] == 2     # found via r2 membership
     assert sel["fission_exit"] == 3          # found ONLY via the looser r1 membership
+
+
+def test_select_minimax_barrier_picks_easiest_path_fe():
+    mm = _load_mapmaker()
+    # axis 0 == c (row), axis 1 == a4 (col); col 4 == a4-max edge.
+    # GS(0) is the deep root; SM(1), FE(2), ridge(3) are all children of GS.
+    labels = np.array(
+        [
+            [0, 0, 1, 1, 1],
+            [0, 0, 1, 1, 1],
+            [0, 0, 2, 2, 2],   # basin 2 touches col-4 (a4 max)
+            [0, 0, 3, 3, 3],   # basin 3 touches col-4 (a4 max)
+            [0, 0, 3, 3, 3],
+        ],
+        dtype=np.int32,
+    )
+    basins = [((0, 0), -3.0), ((0, 2), -0.3), ((2, 2), 0.66), ((4, 2), -1.95)]
+    merges = [
+        ((0, 1), 2.7, 0, 1),  # SM merges into GS, inner barrier 2.7
+        ((1, 2), 4.0, 0, 2),  # FE merges into GS, outer barrier 4.0
+        ((3, 1), 8.0, 0, 3),  # post-scission ridge merges into GS, barrier 8.0
+    ]
+    from pes_analyzer.topology import MergeTree
+    tree = MergeTree(labels, basins, merges)
+    c_vals = {0: 1.2, 1: 1.42, 2: 1.72, 3: 2.0}
+    has = {0: True, 1: True, 2: True, 3: True}
+    sel = mm.select_fos_critical_points(
+        tree, has_min=lambda b: has[b], c_of=lambda b: c_vals[b], a4_axis=1
+    )
+    assert sel["ground_state"] == 0
+    assert sel["secondary_minimum"] == 1          # lowest barrier (2.7) from GS
+    assert sel["inner_saddle"][1] == 2.7
+    assert sel["fission_exit"] == 2               # easiest-barrier edge basin, NOT ridge 3
+    assert sel["outer_saddle"][1] == 4.0          # path SM->GS->FE max saddle = 4.0

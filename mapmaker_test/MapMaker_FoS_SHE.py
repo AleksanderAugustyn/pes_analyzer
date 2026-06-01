@@ -526,21 +526,32 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
     Pure, physics-aware, library-free composition of neutral MergeTree
     primitives. The library itself encodes none of this.
 
+    Selection rule. The ground state is the deepest basin with a confirmed
+    minimum inside the normal-shape region (c < GROUND_STATE_C_THRESHOLD).
+    The secondary minimum and fission exit are found by an *easiest-barrier*
+    search outward: among all tree-reachable basins with c strictly greater
+    than the reference (and the relevant membership / edge predicates), the
+    one whose merge-tree path from the reference has the LOWEST maximum saddle
+    is chosen. The path direction is unconstrained -- it normally dips through
+    the deeper, lower-c ground-state valley before rising to a sibling basin,
+    which is the natural merge-tree topology and exactly why a per-edge
+    monotone-c walk fails here.
+
     Parameters
     ----------
     tree
         A pes_analyzer.topology.MergeTree.
     has_min : Callable[[int], bool]
-        True iff basin ``bid`` contains a confirmed local minimum.
-        Used for GS and SM selection.
+        True iff basin ``bid`` contains a confirmed local minimum (used for
+        the ground state and secondary minimum).
     c_of : Callable[[int], float]
         The ``c`` coordinate of basin ``bid``'s minimum.
     a4_axis : int | None
         Position of the ``a4`` axis in the grid's axis order, or None if a4
-        is not an active axis.
+        is not an active axis (then no basin can satisfy the edge test).
     has_min_fe : Callable[[int], bool] | None
         Membership test for the fission-exit search; defaults to ``has_min``.
-        Lets the FE use a looser confirmation than GS/SM.
+        Lets the FE use a looser confirmation than the GS / SM.
 
     Returns
     -------
@@ -568,18 +579,8 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
     gs = min(candidates, key=lambda b: tree.node(b).minimum_energy)
     result["ground_state"] = gs
 
-    def first_outward(start, member, extra=None):
-        """Nearest basin (by hops) reachable along non-decreasing-c edges that
-        passes ``member``, has strictly larger c than ``start``, and passes the
-        optional ``extra`` predicate."""
-        for bid, _depth in tree.bfs(start, advance=lambda a, b: c_of(b) >= c_of(a)):
-            if bid == start:
-                continue
-            if member(bid) and c_of(bid) > c_of(start) and (extra is None or extra(bid)):
-                return bid
-        return None
-
     def max_saddle(a, b):
+        """Highest-energy saddle on the merge-tree path from ``a`` to ``b``."""
         path = tree.path(a, b)
         saddles = []
         for u, v in zip(path, path[1:]):
@@ -589,19 +590,45 @@ def select_fos_critical_points(tree, has_min, c_of, a4_axis, has_min_fe=None):
                 saddles.append(s)
         return max(saddles, key=lambda s: s[1]) if saddles else None
 
-    sm = first_outward(gs, has_min)
-    result["secondary_minimum"] = sm
-    if sm is None:
+    def lowest_barrier_outward(start, member, extra=None):
+        """Easiest-barrier basin outward from ``start``.
+
+        Among tree basins with ``c_of`` strictly greater than ``start`` that
+        pass ``member`` (and optional ``extra``), return
+        ``(bid, barrier_saddle)`` for the basin whose path from ``start`` has
+        the lowest maximum saddle. None if there is no candidate.
+        """
+        best = None  # (barrier_energy, bid, saddle)
+        for bid in tree.nodes:
+            if bid == start or not member(bid) or c_of(bid) <= c_of(start):
+                continue
+            if extra is not None and not extra(bid):
+                continue
+            saddle = max_saddle(start, bid)
+            if saddle is None:
+                continue
+            barrier = saddle[1]
+            if best is None or barrier < best[0]:
+                best = (barrier, bid, saddle)
+        if best is None:
+            return None
+        return best[1], best[2]
+
+    sm_pick = lowest_barrier_outward(gs, has_min)
+    if sm_pick is None:
         return result
-    result["inner_saddle"] = max_saddle(gs, sm)
+    sm, inner = sm_pick
+    result["secondary_minimum"] = sm
+    result["inner_saddle"] = inner
 
     def touches(bid):
         return a4_axis is not None and tree.touches_edge(bid, a4_axis, "max")
 
-    fe = first_outward(sm, has_min_fe, extra=touches)
-    result["fission_exit"] = fe
-    if fe is not None:
-        result["outer_saddle"] = max_saddle(sm, fe)
+    fe_pick = lowest_barrier_outward(sm, has_min_fe, extra=touches)
+    if fe_pick is not None:
+        fe, outer = fe_pick
+        result["fission_exit"] = fe
+        result["outer_saddle"] = outer
 
     return result
 
