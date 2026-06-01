@@ -57,6 +57,7 @@ from pes_analyzer.topology import (
     MergeTree,
     compute_persistence,
     find_watershed_segmentation,
+    prune_merge_tree,
 )
 
 # =============================================================================
@@ -101,6 +102,9 @@ GS_SM_CONFIRM_RANGE = 2   # range-2 confirmation for ground state / secondary mi
 FE_CONFIRM_RANGE = 1      # looser range-1 confirmation for the fission-exit shoulder minimum
 SM_PERSISTENCE = 0.4          # min persistence (MeV) for the secondary minimum (noise floor)
 THIRD_MIN_PERSISTENCE = 0.4   # min persistence (MeV) for a third minimum to count (noise floor)
+MERGE_TREE_PRUNE = 0.4        # persistence (MeV) threshold for the pruned merge-tree panel
+MERGE_TREE_MARKER_MIN = 0.1   # min persistence (MeV) for a non-critical basin to get a marker+label
+MERGE_TREE_LABEL_MAX = 20     # safety cap: above this many marked nodes, drop per-node text labels
 
 
 # =============================================================================
