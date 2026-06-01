@@ -88,3 +88,42 @@ def test_prune_reduces_displayed_count():
     surviving, _kept = prune_merge_tree(basins, merges, mm.MERGE_TREE_PRUNE)
     assert set(surviving) == {0, 1, 3}        # noise basin 2 removed
     assert len(surviving) < len(basins)
+
+
+def test_no_isomer_fallback_reports_gs_barrier_and_exit():
+    """No basin clears the SM floor: select must still find GS, fission saddle, exit.
+
+    Two basins: a compact GS (interior) and a shallow elongated exit whose
+    minimum sits on the a4-max wall. The exit's persistence (0.2 MeV) is below
+    SM_PERSISTENCE, so it cannot be a secondary minimum -- but it is a valid
+    fission exit. The fallback searches outward from the GS and stores the lone
+    barrier as the inner saddle.
+    """
+    # labels: 2D (c=9, a4=3); a4-max wall is index 2.
+    basins = [
+        ((1, 1), -10.0),   # 0  GS   compact (c idx 1), interior a4
+        ((7, 2), -7.0),    # 1  exit  elongated (c idx 7), on the a4-max wall
+    ]
+    merges = [
+        ((6, 2), -6.8, 0, 1),   # exit 1 dies into GS 0 -> persistence 0.2 (< 0.4)
+    ]
+    labels = np.zeros((9, 3), dtype=np.int32)
+    tree = MergeTree(labels, basins, merges)
+    axes = {"c": np.linspace(0.0, 0.8, 9), "a4": np.linspace(-0.1, 0.1, 3)}
+
+    def has_min(_b):
+        return True
+
+    def c_of(b):
+        return float(axes["c"][tree.node(b).minimum_index[0]])
+
+    sel = mm.select_fos_critical_points(tree, has_min, c_of, c_axis=0, a4_axis=1)
+
+    assert sel["ground_state"] == 0
+    assert sel["secondary_minimum"] is None     # nothing clears the SM floor
+    assert sel["fission_exit"] == 1             # shallow exit still found
+    assert sel["inner_saddle"] is not None      # the lone fission barrier
+    assert sel["inner_saddle"][1] == -6.8       # stored at the barrier energy
+    assert sel["outer_saddle"] is None
+    assert sel["third_minimum"] is None
+    assert sel["third_saddle"] is None

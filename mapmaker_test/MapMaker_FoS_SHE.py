@@ -589,6 +589,13 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
     sought directly. When present it splits the SM->exit barrier: the outer
     saddle then bounds SM<->3rd and the third saddle bounds 3rd<->exit.
 
+    No-isomer fallback. If no basin clears the secondary-minimum test, the
+    search runs the same easiest-barrier scan outward from the GS instead of
+    the SM. The resulting fission exit is reported, and its single controlling
+    saddle -- the lone fission barrier, with no inner/outer split to make -- is
+    stored as the inner saddle. The secondary minimum, third minimum, outer and
+    third saddles stay None.
+
     Parameters
     ----------
     tree
@@ -679,6 +686,18 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
             return False
         return True
 
+    def min_at_a4_edge(bid):
+        """True iff basin ``bid``'s own minimum sits on the a4-max wall.
+
+        A genuine fission exit bottoms out against the box wall because the
+        surface still runs downhill there; a basin that merely *touches* the
+        wall (e.g. a third minimum whose well is interior) does not qualify.
+        """
+        if a4_axis is None:
+            return False
+        last = tree.labels.shape[a4_axis] - 1
+        return tree.node(bid).minimum_index[a4_axis] == last
+
     # The secondary minimum (fission isomer) is the deepest interior well more
     # elongated than the GS, above a persistence noise floor. Depth (not
     # persistence) stays robust when the isomer is shallow; the floor stops a
@@ -693,22 +712,20 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
         and is_interior(bid)
     ]
     if not sm_candidates:
+        # No fission isomer: still report the lone fission barrier and exit by
+        # running the easiest-barrier search outward from the GS itself. With no
+        # second well there is no inner/outer distinction, so the single
+        # controlling saddle is stored as the inner saddle (the fission saddle);
+        # the secondary minimum, third minimum, outer and third saddles stay None.
+        fe_pick = lowest_barrier_outward(gs, has_min_fe, extra=min_at_a4_edge)
+        if fe_pick is not None:
+            fe, barrier = fe_pick
+            result["fission_exit"] = fe
+            result["inner_saddle"] = barrier
         return result
     sm = min(sm_candidates, key=lambda b: tree.node(b).minimum_energy)
     result["secondary_minimum"] = sm
     result["inner_saddle"] = max_saddle(gs, sm)
-
-    def min_at_a4_edge(bid):
-        """True iff basin ``bid``'s own minimum sits on the a4-max wall.
-
-        A genuine fission exit bottoms out against the box wall because the
-        surface still runs downhill there; a basin that merely *touches* the
-        wall (e.g. a third minimum whose well is interior) does not qualify.
-        """
-        if a4_axis is None:
-            return False
-        last = tree.labels.shape[a4_axis] - 1
-        return tree.node(bid).minimum_index[a4_axis] == last
 
     fe_pick = lowest_barrier_outward(sm, has_min_fe, extra=min_at_a4_edge)
     if fe_pick is None:
@@ -1242,9 +1259,23 @@ def plot_merge_tree(tree, roles, axes, nucleus, output_filename,
               for b in sorted(tree.nodes)]
     surviving, _kept = prune_merge_tree(basins, tree._merges, MERGE_TREE_PRUNE)
 
+    # Never prune away a named critical point: a shallow SM / third min / FE
+    # basin would otherwise vanish from the pruned panel. Protect the minima
+    # basins directly, and the child basin carrying each named saddle so its
+    # connector + square still render (saddles are edges, not basins).
+    protected = {roles[k] for k in _MERGE_TREE_ROLE_STYLE if roles.get(k) is not None}
+    saddle_idx = {tuple(int(i) for i in roles[k][0])
+                  for k in _MERGE_TREE_SADDLE_STYLE if roles.get(k) is not None}
+    if saddle_idx:
+        for b in tree.nodes:
+            s = tree.node(b).saddle_to_parent
+            if s is not None and tuple(int(i) for i in s[0]) in saddle_idx:
+                protected.add(b)
+    surviving = sorted(set(surviving) | protected)
+
     panels = [
         ("Unpruned", all_ids),
-        (f"Pruned ≥{MERGE_TREE_PRUNE:g} MeV", surviving),
+        (f"Pruned ≤{MERGE_TREE_PRUNE:g} MeV", surviving),
     ]
 
     with _PLOT_LOCK:
@@ -1272,7 +1303,11 @@ def plot_merge_tree(tree, roles, axes, nucleus, output_filename,
                                       markerfacecolor=color, markeredgecolor="black",
                                       markersize=9, label=lbl))
         if handles:
-            fig.axes[-1].legend(handles=handles, loc="upper right", fontsize=9,
+            # Default to upper right, but drop to lower left when the deepest
+            # basin sits below -20 MeV — there the legend would overlap the curves.
+            lowest = min((e for _, e in basins), default=float("inf"))
+            loc = "lower left" if lowest < -20.0 else "upper right"
+            fig.axes[-1].legend(handles=handles, loc=loc, fontsize=9,
                                 framealpha=0.95)
 
         fig.suptitle(f"Merge tree — {title}", fontsize=15)
