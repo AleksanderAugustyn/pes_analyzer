@@ -20,6 +20,7 @@ from ._tree import (
     identify_critical_points,
     prune_merge_tree,
 )
+from .merge_tree import BasinNode, MergeTree
 
 find_watershed_segmentation = _native_topology.find_watershed_segmentation
 
@@ -28,4 +29,6 @@ __all__ = [
     "compute_persistence",
     "prune_merge_tree",
     "identify_critical_points",
+    "BasinNode",
+    "MergeTree",
 ]
