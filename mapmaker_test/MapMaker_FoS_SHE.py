@@ -566,13 +566,17 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
     elongated than the ground state: among confirmed-minimum basins with c
     strictly greater than the GS, persistence above SM_PERSISTENCE (a noise
     floor, so a dimple beside the GS cannot win) and finite (not the tree
-    root), and no cell on the c-max or a4-max grid wall, the one with the
-    lowest minimum energy is chosen. The floor plus interior test isolate a
-    genuine well from both shallow noise and the deep scission valley the box
-    clips at its c-max / a4-max corner. Selecting by depth rather than
-    persistence stays robust when the fission isomer is shallow (light Th) and
-    mirrors the ground-state rule. The inner saddle is the highest saddle on
-    the merge-tree path from the GS to the secondary minimum.
+    root), no cell on the c-max or a4-max grid wall, and a real barrier outward
+    toward scission (its easiest outward saddle sits at higher c than its own
+    minimum), the one with the lowest minimum energy is chosen. The floor plus
+    interior test isolate a genuine well from both shallow noise and the deep
+    scission valley the box clips at its c-max / a4-max corner; the
+    outward-barrier test rejects a deep well already on the scission slope,
+    whose outward saddle coincides in c with its floor (256Fm). Selecting by
+    depth rather than persistence stays robust when the fission isomer is
+    shallow (light Th) and mirrors the ground-state rule. The inner saddle is
+    the highest saddle on the merge-tree path from the GS to the secondary
+    minimum.
 
     The fission exit is found by an *easiest-barrier* search outward from the
     secondary minimum: among tree basins with c strictly greater whose own
@@ -583,9 +587,12 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
 
     The third minimum is the most persistent *interior-by-minimum* basin lying
     between the secondary minimum and the fission exit in c, with persistence
-    above THIRD_MIN_PERSISTENCE and energy below the outer saddle -- a genuine
-    well on the fission-valley floor rather than a high-energy side pocket or
-    shallow noise basin. It emerges from these neutral predicates; it is never
+    above THIRD_MIN_PERSISTENCE, energy below the outer saddle, a real outward
+    barrier toward scission, and reached *past* the SM's outer barrier (it
+    escapes to the exit over a saddle distinct from the SM's) -- a genuine well
+    on the fission-valley floor rather than a high-energy side pocket, a shallow
+    noise basin, a scission-slope well, or a second pocket sharing the SM's
+    single outer barrier. It emerges from these neutral predicates; it is never
     sought directly. When present it splits the SM->exit barrier: the outer
     saddle then bounds SM<->3rd and the third saddle bounds 3rd<->exit.
 
@@ -698,10 +705,31 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
         last = tree.labels.shape[a4_axis] - 1
         return tree.node(bid).minimum_index[a4_axis] == last
 
+    def has_outward_barrier(bid):
+        """True iff a fission barrier sits OUTWARD (higher c) than this well.
+
+        A genuine fission isomer is bounded toward scission by a saddle at
+        greater elongation than its own floor: the system must climb in c to
+        leave. A basin already on the scission slope has its controlling
+        outward saddle at the *same* (or lower) c as its minimum -- no real
+        barrier separates it from the exit. Compare the easiest outward
+        barrier's c-index against the basin's own minimum c-index. Guards
+        against picking the deep fission-valley floor as the secondary minimum
+        (256Fm: the deepest interior well sits at c=1.83, where its outer
+        saddle coincides with the well at c=1.83 -- the true isomer is c=1.46).
+        """
+        pick = lowest_barrier_outward(bid, has_min_fe, extra=min_at_a4_edge)
+        if pick is None:
+            return False
+        _fe, saddle = pick
+        return saddle[0][c_axis] > tree.node(bid).minimum_index[c_axis]
+
     # The secondary minimum (fission isomer) is the deepest interior well more
-    # elongated than the GS, above a persistence noise floor. Depth (not
-    # persistence) stays robust when the isomer is shallow; the floor stops a
-    # dimple beside the GS from winning; the interior test excludes scission.
+    # elongated than the GS, above a persistence noise floor, with a real
+    # barrier outward toward scission. Depth (not persistence) stays robust when
+    # the isomer is shallow; the floor stops a dimple beside the GS from
+    # winning; the interior test excludes scission; the outward-barrier test
+    # excludes a deep well that is already on the scission slope.
     sm_candidates = [
         bid for bid in tree.nodes
         if bid != gs
@@ -710,6 +738,7 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
         and tree.node(bid).persistence > SM_PERSISTENCE
         and np.isfinite(tree.node(bid).persistence)
         and is_interior(bid)
+        and has_outward_barrier(bid)
     ]
     if not sm_candidates:
         # No fission isomer: still report the lone fission barrier and exit by
@@ -735,9 +764,13 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
     result["outer_saddle"] = outer
 
     # Third minimum: a genuine well on the fission-valley floor between the
-    # secondary minimum and the exit. It must be deep (persistence) AND low
-    # (below the outer saddle); a high-energy side pocket or noise basin fails
-    # one of those and so never emerges.
+    # secondary minimum and the exit. It must be deep (persistence), low (below
+    # the outer saddle), bounded by a real barrier outward toward scission, AND
+    # lie *past* the SM's outer barrier -- reaching the exit over a saddle
+    # distinct from the SM's. A high-energy side pocket, a noise basin, a deep
+    # well already on the scission slope (its outward saddle level with its
+    # floor), or a second pocket sharing the SM's single outer barrier each
+    # fails one of those and so never emerges.
     c_last = tree.labels.shape[c_axis] - 1
     a4_last = tree.labels.shape[a4_axis] - 1 if a4_axis is not None else None
 
@@ -750,6 +783,21 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
             return False
         return True
 
+    def past_outer_barrier(bid):
+        """True iff ``bid`` reaches the exit over a saddle distinct from the SM's.
+
+        A genuine third minimum sits *beyond* the outer barrier: having crossed
+        it, the remaining barrier onward to the fission exit is a different,
+        lower saddle. A candidate that reaches the trunk (the deep exit basin)
+        over the *same* controlling saddle as the SM -- ``outer`` here is
+        ``max_saddle(sm, fe)`` -- is only a second pocket at the floor of the
+        secondary well, sharing its one outer barrier (256Fm c=1.46), not an
+        intermediate valley-floor minimum. There the apparent 'third' saddle
+        IS the outer barrier, and no third minimum exists.
+        """
+        s = max_saddle(bid, fe)
+        return s is not None and s[0] != outer[0]
+
     c_sm, c_fe, e_outer = c_of(sm), c_of(fe), outer[1]
     tm_candidates = [
         bid for bid in tree.nodes
@@ -758,6 +806,8 @@ def select_fos_critical_points(tree, has_min, c_of, c_axis, a4_axis, has_min_fe=
         and c_sm < c_of(bid) < c_fe
         and tree.node(bid).minimum_energy < e_outer
         and interior_minimum(bid)
+        and has_outward_barrier(bid)
+        and past_outer_barrier(bid)
     ]
     if tm_candidates:
         tm = max(tm_candidates, key=lambda b: tree.node(b).persistence)
