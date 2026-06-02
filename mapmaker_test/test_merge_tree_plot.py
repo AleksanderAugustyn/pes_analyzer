@@ -34,6 +34,13 @@ def _synthetic_tree():
     return tree, axes, basins, merges
 
 
+def _synthetic_components():
+    """micro/macro energy grids matching the (9, 3) synthetic label grid."""
+    micro = np.full((9, 3), -5.0)
+    macro = np.full((9, 3), -1840.0)
+    return {"micro_energy": micro, "macro_energy": macro}
+
+
 def test_segments_order_x_by_c_and_root_runs_to_top():
     tree, axes, _, _ = _synthetic_tree()
     displayed = {0, 1, 2, 3}
@@ -127,3 +134,23 @@ def test_no_isomer_fallback_reports_gs_barrier_and_exit():
     assert sel["outer_saddle"] is None
     assert sel["third_minimum"] is None
     assert sel["third_saddle"] is None
+
+
+def test_merge_tree_label_lists_all_axes_and_energies():
+    _, axes, _, _ = _synthetic_tree()
+    text = mm._merge_tree_label((1, 1), -10.0, axes, _synthetic_components())
+    lines = text.split("\n")
+    assert lines[0].startswith("c=")
+    assert any(l.startswith("a4=") for l in lines)
+    assert "E=-10.000" in lines
+    assert any(l.startswith("Emic=") for l in lines)
+    assert any(l.startswith("Emac=") for l in lines)
+
+
+def test_merge_tree_label_omits_nan_and_missing_components():
+    _, axes, _, _ = _synthetic_tree()
+    micro = np.full((9, 3), np.nan)                  # NaN at every cell
+    text = mm._merge_tree_label((1, 1), -10.0, axes, {"micro_energy": micro})
+    assert "Emic" not in text                        # NaN value -> line dropped
+    assert "Emac" not in text                        # grid absent -> line dropped
+    assert "E=-10.000" in text.split("\n")

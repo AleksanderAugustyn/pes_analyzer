@@ -1166,6 +1166,77 @@ def _merge_tree_segments(tree, displayed_ids, c_pos, top_energy):
     return x_of, vsegs, hsegs
 
 
+def _merge_tree_label(idx, energy, axes, components):
+    """One-field-per-line label: every active axis, then total/micro/macro E.
+
+    Parameters
+    ----------
+    idx : sequence of int
+        Grid cell — a basin's ``minimum_index`` or a saddle index.
+    energy : float
+        Total energy at the cell (shown as ``E``).
+    axes : dict[str, np.ndarray]
+        Active-axis name -> sorted values, in grid-axis order.
+    components : dict[str, np.ndarray] | None
+        Energy-component grids. ``micro_energy`` / ``macro_energy`` are read at
+        ``idx`` when present; a missing grid or a NaN value drops that line so a
+        release-build ``nan`` never reaches the figure.
+    """
+    cell = tuple(int(i) for i in idx)
+    lines = [f"{name}={float(values[cell[pos]]):.3f}"
+             for pos, (name, values) in enumerate(axes.items())]
+    lines.append(f"E={energy:.3f}")
+    for key, tag in (("micro_energy", "Emic"), ("macro_energy", "Emac")):
+        grid = (components or {}).get(key)
+        if grid is None:
+            continue
+        val = float(grid[cell])
+        if not np.isnan(val):
+            lines.append(f"{tag}={val:.3f}")
+    return "\n".join(lines)
+
+
+def _resolve_label_positions(anchors, sizes, base_dx=12.0, gap=2.0):
+    """Greedy non-overlapping placement of right-side labels, in pixel space.
+
+    Each label is placed to the right of its anchor and, when it would overlap
+    an already-placed label, nudged upward until clear. Input order sets
+    priority: earlier labels are placed first and stay lower.
+
+    Parameters
+    ----------
+    anchors : list[tuple[float, float]]
+        (x, y) anchor pixel coords (the marker each label belongs to).
+    sizes : list[tuple[float, float]]
+        (width, height) of each label box in pixels.
+    base_dx : float
+        Horizontal gap (px) from the anchor to the label's left edge.
+    gap : float
+        Minimum gap (px) kept between stacked label boxes.
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        (x0, y0) bottom-left pixel position per label, in input order.
+    """
+    placed = []          # (x0, y0, x1, y1) of already-positioned boxes
+    out = []
+    for (ax_pix, ay_pix), (w, h) in zip(anchors, sizes):
+        x0 = ax_pix + base_dx
+        x1 = x0 + w
+        y0 = ay_pix - h / 2.0                     # centered on the anchor
+        moved = True
+        while moved:                              # only ever moves upward
+            moved = False
+            for px0, py0, px1, py1 in placed:
+                if x0 < px1 and x1 > px0 and y0 < py1 and (y0 + h) > py0:
+                    y0 = py1 + gap                # sit just above the collision
+                    moved = True
+        placed.append((x0, y0, x1, y0 + h))
+        out.append((x0, y0))
+    return out
+
+
 # Role -> (matplotlib marker, face color, label) for the named critical points.
 # Mirrors create_contour_plot's marker_styles so the two figures agree.
 _MERGE_TREE_ROLE_STYLE = {
