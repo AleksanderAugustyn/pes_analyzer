@@ -84,7 +84,8 @@ def test_plot_merge_tree_writes_two_panel_png(tmp_path):
 
     out = tmp_path / "merge_tree.png"
     import io
-    mm.plot_merge_tree(tree, roles, axes, nucleus, str(out), out=io.StringIO())
+    mm.plot_merge_tree(tree, roles, axes, nucleus, str(out),
+                       components=_synthetic_components(), out=io.StringIO())
 
     assert out.exists() and out.stat().st_size > 0
 

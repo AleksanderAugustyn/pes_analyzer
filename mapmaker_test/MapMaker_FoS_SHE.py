@@ -45,6 +45,7 @@ matplotlib.use('Agg')  # Non-interactive backend; safe to call from worker threa
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 import numpy as np
@@ -105,7 +106,6 @@ SM_PERSISTENCE = 0.4          # min persistence (MeV) for the secondary minimum 
 THIRD_MIN_PERSISTENCE = 0.4   # min persistence (MeV) for a third minimum to count (noise floor)
 MERGE_TREE_PRUNE = 0.4        # persistence (MeV) threshold for the pruned merge-tree panel
 MERGE_TREE_MARKER_MIN = 0.1   # min persistence (MeV) for a non-critical basin to get a marker+label
-MERGE_TREE_LABEL_MAX = 20     # safety cap: above this many marked nodes, drop per-node text labels
 
 
 # =============================================================================
@@ -1252,9 +1252,17 @@ _MERGE_TREE_SADDLE_STYLE = {
 }
 
 
-def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos, a4_pos,
-                           show_labels):
-    """Draw one dendrogram panel onto ``ax``. Returns the number of markers drawn."""
+def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos,
+                           components, detailed_labels):
+    """Draw one dendrogram panel onto ``ax``.
+
+    When ``detailed_labels`` is True (the pruned panel), every drawn basin
+    marker and named saddle gets a stacked label (all active axes + total/
+    micro/macro E); the created annotation artists are returned as
+    ``[(annotation, x, energy), ...]`` so the caller can de-overlap them once
+    the figure has a renderer. When False (the unpruned panel) no text is drawn
+    and an empty list is returned.
+    """
     disp = set(displayed_ids)
 
     # Top of the panel: a margin above the highest minimum / saddle on display.
@@ -1286,37 +1294,20 @@ def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos, a4_pos,
         if s is not None:
             saddle_role_color[tuple(int(i) for i in s[0])] = color
 
-    # Shared label formatting + de-collision placement (basins and saddles).
-    e_span = e_hi - e_lo + 1e-9
-    placed_labels = []          # (x, energy) anchors already labeled
-    label_parts_axes = [("c", c_pos)]
-    if a4_pos is not None:
-        label_parts_axes.append(("a4", a4_pos))
+    annotations = []        # (annotation artist, anchor_x, anchor_energy)
 
-    def _coord_label(idx, energy):
-        parts = "  ".join(
-            f"{name}={float(axes[name][idx[pos]]):.3f}"
-            for name, pos in label_parts_axes
-        )
-        return parts + f"\nE={energy:.3f}"
-
-    def _place_label(text, x, energy):
-        # Labels run horizontally, so two on the same energy row overprint even
-        # when their points are several ranks apart. Collision keys on energy
-        # proximity (same row) with a wide x window scaled to the panel's node
-        # count; a colliding label drops below its point instead of above.
-        x_win = max(4.0, 0.25 * len(disp))
-        collides = any(
-            abs(px - x) <= x_win and abs(pe - energy) <= 0.04 * e_span
-            for px, pe in placed_labels
-        )
-        dy, va = (-8, "top") if collides else (6, "bottom")
-        ax.annotate(text, (x, energy), textcoords="offset points",
-                    xytext=(6, dy), va=va, fontsize=7, zorder=6)
-        placed_labels.append((x, energy))
+    def _label(idx, x, energy):
+        # clip_on=False so the label survives outside the axes; bbox_inches=
+        # "tight" then grows the saved figure to include it. Final position is
+        # set later by _resolve_label_positions once extents are measurable.
+        ann = ax.annotate(
+            _merge_tree_label(idx, energy, axes, components),
+            xy=(x, energy), xytext=(12, 0), textcoords="offset pixels",
+            va="center", ha="left", fontsize=7, zorder=6, clip_on=False)
+        annotations.append((ann, x, energy))
 
     # Saddle squares + labels on the matching connectors. Saddles are named
-    # critical points, so they are always labeled.
+    # critical points, so they are always labeled when the panel is detailed.
     for x_child, x_anc, e_saddle, child in hsegs:
         s = tree.node(child).saddle_to_parent
         if s is None:
@@ -1326,12 +1317,13 @@ def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos, a4_pos,
             xs = (x_child + x_anc) / 2.0
             ax.plot(xs, e_saddle, "s", color=color, markersize=9,
                     markeredgecolor="black", markeredgewidth=1.2, zorder=4)
-            _place_label(_coord_label(s[0], e_saddle), xs, e_saddle)
+            if detailed_labels:
+                _label(s[0], xs, e_saddle)
 
     # Basin markers + labels. A basin is marked iff it is named OR clears the
     # persistence floor.
     n_markers = 0
-    for b in sorted(disp):      # sorted -> deterministic, reproducible label placement
+    for b in sorted(disp):      # sorted -> deterministic, reproducible placement
         node = tree.node(b)
         named = b in basin_role
         if not named and not (node.persistence > MERGE_TREE_MARKER_MIN):
@@ -1345,20 +1337,16 @@ def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos, a4_pos,
         ax.plot(x, node.minimum_energy, marker, color=color, markersize=size,
                 markeredgecolor="black", markeredgewidth=1.2, zorder=5)
         n_markers += 1
-
-        # Named criticals are always labeled; other basins only when the panel
-        # is under the label cap (the unpruned panel can have 100+ basins).
-        if show_labels or named:
-            _place_label(_coord_label(node.minimum_index, node.minimum_energy),
-                         x, node.minimum_energy)
+        if detailed_labels:
+            _label(node.minimum_index, x, node.minimum_energy)
 
     ax.set_xlim(-1, max(x_of.values()) + 1 if x_of else 1)
     ax.set_xticks([])
-    return n_markers
+    return annotations
 
 
 def plot_merge_tree(tree, roles, axes, nucleus, output_filename,
-                    out: TextIO = sys.stdout) -> None:
+                    components=None, out: TextIO = sys.stdout) -> None:
     """Two-panel merge-tree dendrogram: unpruned (all basins) vs pruned.
 
     ``roles`` is the ``sel`` dict from select_fos_critical_points: keys
@@ -1373,7 +1361,6 @@ def plot_merge_tree(tree, roles, axes, nucleus, output_filename,
 
     axis_names = list(axes)
     c_pos = axis_names.index("c") if "c" in axis_names else 0
-    a4_pos = axis_names.index("a4") if "a4" in axis_names else None
 
     all_ids = list(tree.nodes.keys())
     basins = [(tree.node(b).minimum_index, tree.node(b).minimum_energy)
@@ -1403,15 +1390,40 @@ def plot_merge_tree(tree, roles, axes, nucleus, output_filename,
         fig = Figure(figsize=(14, 8))
         title = nucleus.isotope_label or Path(output_filename).stem
 
+        right_ax = None
+        right_annotations = []
         for col, (panel_label, ids) in enumerate(panels):
             ax = fig.add_subplot(1, 2, col + 1)
-            show_labels = len(ids) <= MERGE_TREE_LABEL_MAX
-            _draw_merge_tree_panel(ax, tree, ids, roles, axes, c_pos, a4_pos,
-                                   show_labels)
+            detailed = (col == 1)                 # right panel = pruned
+            anns = _draw_merge_tree_panel(ax, tree, ids, roles, axes, c_pos,
+                                          components, detailed)
+            if detailed:
+                right_ax, right_annotations = ax, anns
             ax.set_title(f"{panel_label}  (n={len(ids)})", fontsize=13)
             ax.set_ylabel("E (MeV)", fontsize=13)
 
-        # One shared legend (named criticals) on the right panel.
+        # De-overlap the right-panel labels. Measuring text extents needs a
+        # renderer, so attach an Agg canvas and draw once before repositioning.
+        # Process bottom-to-top so stacking (which only moves labels up) is
+        # deterministic.
+        if right_annotations:
+            right_annotations.sort(key=lambda t: t[2])
+            FigureCanvasAgg(fig)
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            anchors, sizes, anns = [], [], []
+            for ann, x, energy in right_annotations:
+                bbox = ann.get_window_extent(renderer)
+                anchors.append(tuple(right_ax.transData.transform((x, energy))))
+                sizes.append((bbox.width, bbox.height))
+                anns.append(ann)
+            placements = _resolve_label_positions(anchors, sizes)
+            for ann, (ax_pix, ay_pix), (x0, y0) in zip(anns, anchors, placements):
+                # set_position is in the annotation's textcoords (offset pixels),
+                # i.e. relative to its anchor point.
+                ann.set_position((x0 - ax_pix, y0 - ay_pix))
+
+        # One shared legend (named criticals) on the LEFT (text-free) panel.
         handles = []
         for k, (marker, color, lbl) in _MERGE_TREE_ROLE_STYLE.items():
             if roles.get(k) is not None:
@@ -1425,11 +1437,11 @@ def plot_merge_tree(tree, roles, axes, nucleus, output_filename,
                                       markersize=9, label=lbl))
         if handles:
             # Default to upper right, but drop to lower left when the deepest
-            # basin sits below -20 MeV — there the legend would overlap the curves.
+            # basin sits below -20 MeV — there the legend would overlap the tree.
             lowest = min((e for _, e in basins), default=float("inf"))
             loc = "lower left" if lowest < -20.0 else "upper right"
-            fig.axes[-1].legend(handles=handles, loc=loc, fontsize=9,
-                                framealpha=0.95)
+            fig.axes[0].legend(handles=handles, loc=loc, fontsize=9,
+                               framealpha=0.95)
 
         fig.suptitle(f"Merge tree — {title}", fontsize=15)
         fig.tight_layout()
@@ -1635,7 +1647,7 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
     )
     plot_merge_tree(
         tree, sel, axes, nucleus,
-        f'{parquet_file.stem}_merge_tree.png', out=out,
+        f'{parquet_file.stem}_merge_tree.png', components=components, out=out,
     )
 
     output_name = parquet_file.stem
