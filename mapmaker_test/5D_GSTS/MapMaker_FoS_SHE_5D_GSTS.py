@@ -745,16 +745,22 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
                       right[0] if right else np.inf)
         return barrier - all_ext[i][1]
 
-    def reject_reason(k, e, prev_k, depth_floor):
+    def reject_reason(k, e, prev_k, prev_e, depth_floor):
         """Physical conditions for a labeled fission well; None if it passes.
 
-        A real well sits in the barrier region (above the GS energy, first
-        half of the path), is distinct from the previous labeled minimum
-        (MIN_SEPARATION_FRAC of the path), is deep enough to be noteworthy
-        (depth_floor), and sits at or near an r=2-confirmed local minimum.
+        A real well sits in the barrier region (first half of the path) and
+        ABOVE the previous labeled minimum: GS < SM < TM in energy. The
+        fission wells are valleys passed while climbing out of the barrier
+        complex; a well below the previous one is already on the way down
+        (232Th, with a genuine third minimum, is the template). It must
+        also be distinct from the previous labeled minimum
+        (MIN_SEPARATION_FRAC of the path), deep enough to be noteworthy
+        (depth_floor), and sit at or near an r=2-confirmed local minimum.
         """
         if e <= gs_e:
             return "below GS energy (scission slope)"
+        if e <= prev_e:
+            return "below previous labeled minimum (valley on the descent)"
         if k > last // 2:
             return "beyond half-path"
         if k - prev_k < min_sep:
@@ -775,10 +781,10 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
     sm = tm = None
     for k, e in interior_all:
         if sm is None:
-            reason = reject_reason(k, e, 0, SM_PERSISTENCE)
+            reason = reject_reason(k, e, 0, gs_e, SM_PERSISTENCE)
             label = "SM" if reason is None else None
         elif tm is None:
-            reason = reject_reason(k, e, sm[0], THIRD_MIN_PERSISTENCE)
+            reason = reject_reason(k, e, sm[0], sm[1], THIRD_MIN_PERSISTENCE)
             label = "TM" if reason is None else None
         else:
             reason, label = "SM and TM already assigned", None
