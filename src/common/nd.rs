@@ -123,6 +123,33 @@ pub fn full_neighbors(
     }
 }
 
+/// Neighbor stencil selector shared by the flood-based kernels
+/// (`find_iwf_grid`, `find_watershed_segmentation`, `find_minimum_energy_path`).
+/// Range is fixed at 1 for both variants.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stencil {
+    /// 2N axis-aligned neighbors (von Neumann).
+    VonNeumann,
+    /// 3^N − 1 Chebyshev-box neighbors (Moore).
+    Moore,
+}
+
+impl Stencil {
+    /// Enumerate the in-bounds neighbors of `linear` into `out` (cleared first).
+    pub fn neighbors(
+        self,
+        linear: usize,
+        shape: &[usize],
+        strides: &[usize],
+        out: &mut Vec<usize>,
+    ) {
+        match self {
+            Stencil::VonNeumann => axis_neighbors(linear, shape, strides, out),
+            Stencil::Moore => full_neighbors(linear, shape, strides, 1, out),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +340,30 @@ mod tests {
         let mut buf = Vec::new();
         full_neighbors(0, &shape, &strides, 2, &mut buf);
         assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn stencil_von_neumann_matches_axis_neighbors() {
+        let shape = [5, 5];
+        let strides = compute_strides(&shape);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        Stencil::VonNeumann.neighbors(12, &shape, &strides, &mut a);
+        axis_neighbors(12, &shape, &strides, &mut b);
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn stencil_moore_matches_full_neighbors_r1() {
+        let shape = [5, 5];
+        let strides = compute_strides(&shape);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        Stencil::Moore.neighbors(12, &shape, &strides, &mut a);
+        full_neighbors(12, &shape, &strides, 1, &mut b);
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
     }
 
     #[test]
