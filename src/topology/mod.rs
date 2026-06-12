@@ -1,6 +1,7 @@
 //! `pes_analyzer.topology` submodule: full watershed segmentation and
 //! merge-tree construction.
 
+pub mod mep;
 pub mod watershed;
 
 use ndarray::{Array, IxDyn};
