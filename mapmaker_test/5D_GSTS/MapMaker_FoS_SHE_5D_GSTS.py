@@ -115,14 +115,18 @@ PARAMETER_LIMITS = {
 # ANALYSIS THRESHOLDS
 # =============================================================================
 GROUND_STATE_C_THRESHOLD = 1.4   # GS must lie within the normal-shape region (c < this)
-GS_SM_CONFIRM_RANGE = 2   # range-2 confirmation for ground state / secondary minimum
+GS_SM_CONFIRM_RANGE = 2       # range-2 confirmation for ground-state candidate selection
 MEP_PERSISTENCE = 0.4         # noise floor (MeV) for pruning the raw MEP profile
-SM_PERSISTENCE = 1.0          # min profile well depth (MeV) for the secondary minimum
-THIRD_MIN_PERSISTENCE = 0.5   # min profile well depth (MeV) for the third minimum
-MIN_SEPARATION_FRAC = 0.05    # min spacing between labeled minima, fraction of MEP length
-CONFIRMED_MIN_RADIUS = 2      # max Chebyshev cells from a labeled minimum to an r=2-confirmed one
-MERGE_TREE_PRUNE = 0.4        # persistence (MeV) threshold for the pruned merge-tree panel
-MERGE_TREE_MARKER_MIN = 0.1   # min persistence (MeV) for a non-critical basin to get a marker+label
+SM_PERSISTENCE = 1.0          # min N-D BASIN persistence (MeV) for the secondary minimum
+THIRD_MIN_PERSISTENCE = 0.5   # min N-D BASIN persistence (MeV) for the third minimum
+MERGE_TREE_PRUNE = 0.4        # presentation-only (pruned-tree panel); NOT used in classification
+MERGE_TREE_MARKER_MIN = 0.1   # presentation-only: marker/label floor on the tree panels
+
+# P5 (stencil consistency): the watershed/merge tree and the MEP must use the
+# same neighbour stencil, or basin ids looked up from path cells (P1) and
+# segment-max saddle energies (P3) stop being exact. Pass this constant to
+# BOTH find_watershed_segmentation and find_minimum_energy_path.
+FLOOD_NEIGHBORHOOD = "von_neumann"
 
 
 # =============================================================================
@@ -729,27 +733,29 @@ def _collect_mep_candidates(profile, path_idx, tree, gs_basin, fe_basin):
 
 
 def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdout):
-    """GS / SM / 3rd-min / FE / saddles read off the MEP profile.
+    """GS / SM / 3rd-min / FE / saddles: MEP ordering, merge-tree identity.
 
     The ground state is the deepest confirmed minimum with
     c < GROUND_STATE_C_THRESHOLD. The fission exit is the global-minimum
-    cell of the grid. The deep-minimax MEP between them is the fission
-    path; after persistence pruning (MEP_PERSISTENCE) its interior profile
-    minima are the secondary and third minima in path order, and its
-    profile maxima are the inner / outer / third saddles. With no interior
-    minimum the single profile maximum is the lone fission barrier, stored
-    as the inner saddle (same convention as the old merge-tree selection).
+    cell of the grid. The deep-minimax MEP between them orders the wells
+    and assigns saddles to segments; the merge tree is authoritative for
+    well identity (basin id, P1/P2 dedup) and significance (N-D basin
+    persistence vs SM_PERSISTENCE / THIRD_MIN_PERSISTENCE). Classification
+    runs on the UNPRUNED tree; MERGE_TREE_PRUNE is presentation-only.
 
-    Returns (sel, path_indices, path_energies, profile); ``sel`` has the
-    same keys as the old selection (basin ids for minima via
-    tree.basin_of_point -- profile minima are basin seed cells by
-    construction, so the lookup is exact; (index, energy) tuples for
-    saddles).
+    Returns (sel, path_indices, path_energies, profile). ``sel`` keys:
+    basin ids for ground_state / secondary_minimum / third_minimum /
+    fission_exit; (index, energy) tuples for inner/outer/third saddles;
+    plus ``gs_persistence_bf`` (GS basin persistence = minimax barrier
+    height, None while unknown or for an undying GS root basin),
+    ``saddle_segments`` (saddle key -> "gs-sm" style segment name), and
+    ``well_depths`` (role -> 1-D profile escape depth, diagnostic only).
     """
     sel = {
         "ground_state": None, "secondary_minimum": None, "third_minimum": None,
         "fission_exit": None, "inner_saddle": None, "outer_saddle": None,
         "third_saddle": None,
+        "gs_persistence_bf": None, "saddle_segments": {}, "well_depths": {},
     }
     c_pos = list(axes).index('c')
     gs_candidates = [
@@ -766,7 +772,8 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
     if fe_idx == tuple(gs_idx):
         return sel, None, None, None      # degenerate map: GS is the deepest cell
 
-    mep = find_minimum_energy_path(energies, tuple(gs_idx), fe_idx)
+    mep = find_minimum_energy_path(energies, tuple(gs_idx), fe_idx,
+                                   neighborhood=FLOOD_NEIGHBORHOOD)
     if mep is None:
         return sel, None, None, None      # NaN wall between GS and exit
     path_idx, path_e = mep
@@ -781,91 +788,98 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
 
     last = len(path_e) - 1
     gs_e = float(path_e[0])
-    min_sep = max(1, int(round(MIN_SEPARATION_FRAC * last)))
-    conf_idx = np.array([idx for idx, _e in minima_gs_sm], dtype=np.int64)
 
-    # Escape depth of a surviving profile minimum: the climb to the nearest
-    # surviving saddle on the easier side -- the well's persistence along
-    # the path.
+    # 1-D escape depth along the path: DIAGNOSTIC only. Persistence is the
+    # authority for significance; profile depth >= persistence always, and
+    # the gap measures how often the lowest escape bypasses the path
+    # (basin-led classification spec, sections 4 and 6.1).
     all_ext = sorted(
         [(k, e, True) for k, e in profile.minima]
         + [(k, e, False) for k, e in profile.saddles]
     )
 
     def well_depth(k0):
-        i = next(j for j, (k, _e, _m) in enumerate(all_ext) if k == k0)
+        i = next((j for j, (k, _e, _m) in enumerate(all_ext) if k == k0), None)
+        if i is None:
+            return float('nan')
         left = [e for _k, e, m in all_ext[:i] if not m]
         right = [e for _k, e, m in all_ext[i + 1:] if not m]
         barrier = min(left[-1] if left else np.inf,
                       right[0] if right else np.inf)
         return barrier - all_ext[i][1]
 
-    def reject_reason(k, e, prev_k, prev_e, depth_floor):
-        """Physical conditions for a labeled fission well; None if it passes.
+    interior = _collect_mep_candidates(
+        profile, path_idx, tree, sel["ground_state"], sel["fission_exit"])
 
-        A real well sits in the barrier region (first half of the path) and
-        ABOVE the previous labeled minimum: GS < SM < TM in energy. The
-        fission wells are valleys passed while climbing out of the barrier
-        complex; a well below the previous one is already on the way down
-        (232Th, with a genuine third minimum, is the template). It must
-        also be distinct from the previous labeled minimum
-        (MIN_SEPARATION_FRAC of the path), deep enough to be noteworthy
-        (depth_floor), and sit at or near an r=2-confirmed local minimum.
-        """
-        if e <= gs_e:
-            return "below GS energy (scission slope)"
-        if e <= prev_e:
-            return "below previous labeled minimum (valley on the descent)"
-        if k > last // 2:
-            return "beyond half-path"
-        if k - prev_k < min_sep:
-            return f"only {k - prev_k} steps from previous labeled minimum (<{min_sep})"
-        if well_depth(k) < depth_floor:
-            return f"well depth {well_depth(k):.2f} MeV < {depth_floor} MeV"
-        cell = np.array(grid_pt(k)[0], dtype=np.int64)
-        cheb = int(np.abs(conf_idx - cell).max(axis=1).min())
-        if cheb > CONFIRMED_MIN_RADIUS:
-            return (f"nearest r{GS_SM_CONFIRM_RANGE}-confirmed minimum is "
-                    f"{cheb} cells away (>{CONFIRMED_MIN_RADIUS})")
-        return None
-
-    # Walk interior minima in path order: the first well passing the SM
-    # conditions is the secondary minimum; the first one after it passing
-    # the TM conditions is the third minimum. No SM means no TM search.
-    interior_all = [(k, e) for k, e in profile.minima if k not in (0, last)]
-    sm = tm = None
-    for k, e in interior_all:
-        if sm is None:
-            reason = reject_reason(k, e, 0, gs_e, SM_PERSISTENCE)
+    # Walk interior minima in path order: the first candidate passing the
+    # SM conditions is the secondary minimum; the first one after it
+    # passing the TM conditions is the third minimum. No SM means no TM
+    # search. Identity = basin id, significance = basin persistence; the
+    # profile only sets the ordering.
+    sm = tm = None                        # (k, e, basin_id)
+    for k, e, bid, skip in interior:
+        pers = tree.node(bid).persistence
+        if skip is not None:
+            label = None
+            verdict = f"-> ({skip})"
+        elif sm is None:
+            reason = _mep_reject_reason(k, e, gs_e, gs_e, last,
+                                        SM_PERSISTENCE, pers)
             label = "SM" if reason is None else None
+            verdict = f"-> {label}" if label else f"[{reason}]"
         elif tm is None:
-            reason = reject_reason(k, e, sm[0], sm[1], THIRD_MIN_PERSISTENCE)
+            reason = _mep_reject_reason(k, e, sm[1], gs_e, last,
+                                        THIRD_MIN_PERSISTENCE, pers)
             label = "TM" if reason is None else None
+            verdict = f"-> {label}" if label else f"[{reason}]"
         else:
-            reason, label = "SM and TM already assigned", None
-        tag = f"  -> {label}" if label else f"  [{reason}]"
+            label = None
+            verdict = "[SM and TM already assigned]"
         print(f"      interior minimum: step {k} "
-              f"{_format_coords(grid_pt(k)[0], axes)} E={e:.4f}{tag}", file=out)
+              f"{_format_coords(grid_pt(k)[0], axes)} E={e:.4f}", file=out)
+        print(f"          basin #{bid}  persistence={pers:.2f} MeV  "
+              f"profile-depth={well_depth(k):.2f} MeV  {verdict}", file=out)
         if label == "SM":
-            sm = (k, e)
+            sm = (k, e, bid)
         elif label == "TM":
-            tm = (k, e)
+            tm = (k, e, bid)
 
     if sm is not None:
-        sel["secondary_minimum"] = tree.basin_of_point(grid_pt(sm[0])[0])
+        sel["secondary_minimum"] = sm[2]
+        sel["well_depths"]["secondary_minimum"] = well_depth(sm[0])
     if tm is not None:
-        sel["third_minimum"] = tree.basin_of_point(grid_pt(tm[0])[0])
+        sel["third_minimum"] = tm[2]
+        sel["well_depths"]["third_minimum"] = well_depth(tm[0])
+    sel["well_depths"]["ground_state"] = well_depth(0)
+
+    # GS basin persistence = minimax fission-barrier height from the GS
+    # (spec 6.4): finite whenever the surface descends past scission. It
+    # must match the highest path saddle minus the GS energy unless the
+    # lowest escape bypasses the MEP -- log that case (spec 8.5).
+    gs_node = tree.node(sel["ground_state"])
+    gs_pers = float(gs_node.persistence)
+    if np.isfinite(gs_pers):
+        sel["gs_persistence_bf"] = gs_pers
+        if profile.saddles:
+            bf_path = max(e for _k, e in profile.saddles) - gs_node.minimum_energy
+            if gs_pers < bf_path - 1e-6:
+                print(f"    NOTE: GS persistence {gs_pers:.4f} MeV < path barrier "
+                      f"{bf_path:.4f} MeV -- lowest escape bypasses the MEP", file=out)
 
     # One barrier per pair of consecutive labeled minima (GS, SM, TM, FE):
-    # the highest profile saddle inside that segment. Dropping an unlabeled
-    # pocket merges its two segments, so the max is the controlling barrier.
-    anchors = [0] + [k for k, _e in (m for m in (sm, tm) if m is not None)] + [last]
+    # the highest profile saddle inside that segment, exact by P3. Dropping
+    # an unlabeled pocket merges its two segments, so the max is the
+    # controlling barrier; segment names go to the CSV (spec 5.6).
+    anchors = [(0, "gs")] \
+        + [(m[0], name) for m, name in ((sm, "sm"), (tm, "tm")) if m is not None] \
+        + [(last, "fe")]
     saddle_keys = ["inner_saddle", "outer_saddle", "third_saddle"]
-    for key, (a, b) in zip(saddle_keys, zip(anchors, anchors[1:])):
+    for key, ((a, name_a), (b, name_b)) in zip(saddle_keys, zip(anchors, anchors[1:])):
         segment = [(k, e) for k, e in profile.saddles if a < k < b]
         if segment:
             k_max, _e_max = max(segment, key=lambda t: t[1])
             sel[key] = grid_pt(k_max)
+            sel["saddle_segments"][key] = f"{name_a}-{name_b}"
     return sel, path_idx, path_e, profile
 
 
@@ -961,7 +975,8 @@ def run_critical_point_analysis_nd(
 
     print("\n  Step 2: Watershed segmentation + merge tree (no pruning)", file=out)
     t0 = time.perf_counter()
-    labels, basins, merges = find_watershed_segmentation(energies)
+    labels, basins, merges = find_watershed_segmentation(
+        energies, neighborhood=FLOOD_NEIGHBORHOOD)
     tree = MergeTree(labels, basins, merges)
     print(f"    Basins: {len(basins)}; merge events: {len(merges)}", file=out)
     print(f"  [time] Step 2 (watershed+tree): {time.perf_counter() - t0:.2f} s", file=out)
