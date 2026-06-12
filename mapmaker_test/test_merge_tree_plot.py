@@ -34,6 +34,13 @@ def _synthetic_tree():
     return tree, axes, basins, merges
 
 
+def _synthetic_components():
+    """micro/macro energy grids matching the (9, 3) synthetic label grid."""
+    micro = np.full((9, 3), -5.0)
+    macro = np.full((9, 3), -1840.0)
+    return {"micro_energy": micro, "macro_energy": macro}
+
+
 def test_segments_order_x_by_c_and_root_runs_to_top():
     tree, axes, _, _ = _synthetic_tree()
     displayed = {0, 1, 2, 3}
@@ -77,7 +84,8 @@ def test_plot_merge_tree_writes_two_panel_png(tmp_path):
 
     out = tmp_path / "merge_tree.png"
     import io
-    mm.plot_merge_tree(tree, roles, axes, nucleus, str(out), out=io.StringIO())
+    mm.plot_merge_tree(tree, roles, axes, nucleus, str(out),
+                       components=_synthetic_components(), out=io.StringIO())
 
     assert out.exists() and out.stat().st_size > 0
 
@@ -127,3 +135,44 @@ def test_no_isomer_fallback_reports_gs_barrier_and_exit():
     assert sel["outer_saddle"] is None
     assert sel["third_minimum"] is None
     assert sel["third_saddle"] is None
+
+
+def test_merge_tree_label_lists_all_axes_and_energies():
+    _, axes, _, _ = _synthetic_tree()
+    text = mm._merge_tree_label((1, 1), -10.0, axes, _synthetic_components())
+    lines = text.split("\n")
+    assert lines[0].startswith("c=")
+    assert any(l.startswith("a4=") for l in lines)
+    assert "E=-10.000" in lines
+    assert any(l.startswith("Emic=") for l in lines)
+    assert any(l.startswith("Emac=") for l in lines)
+
+
+def test_merge_tree_label_omits_nan_and_missing_components():
+    _, axes, _, _ = _synthetic_tree()
+    micro = np.full((9, 3), np.nan)                  # NaN at every cell
+    text = mm._merge_tree_label((1, 1), -10.0, axes, {"micro_energy": micro})
+    assert "Emic" not in text                        # NaN value -> line dropped
+    assert "Emac" not in text                        # grid absent -> line dropped
+    assert "E=-10.000" in text.split("\n")
+
+
+def test_resolve_label_positions_no_overlap_when_stacked():
+    # Two same-x anchors whose centered boxes would overlap; second is raised.
+    anchors = [(0.0, 100.0), (0.0, 110.0)]
+    sizes = [(50.0, 40.0), (50.0, 40.0)]
+    out = mm._resolve_label_positions(anchors, sizes, base_dx=12.0, gap=2.0)
+    (x0a, y0a), (x0b, y0b) = out
+    ax0, ay0, ax1, ay1 = x0a, y0a, x0a + 50, y0a + 40
+    bx0, by0, bx1, by1 = x0b, y0b, x0b + 50, y0b + 40
+    overlap = ax0 < bx1 and ax1 > bx0 and ay0 < by1 and ay1 > by0
+    assert not overlap
+
+
+def test_resolve_label_positions_keeps_far_apart_labels_centered():
+    # Anchors far apart in x: no vertical nudging needed, both stay centered.
+    anchors = [(0.0, 100.0), (500.0, 100.0)]
+    sizes = [(50.0, 40.0), (50.0, 40.0)]
+    out = mm._resolve_label_positions(anchors, sizes)
+    assert out[0][1] == 100.0 - 20.0     # y0 = anchor_y - height/2
+    assert out[1][1] == 100.0 - 20.0
