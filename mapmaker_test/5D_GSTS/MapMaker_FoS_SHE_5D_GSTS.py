@@ -48,6 +48,7 @@ import matplotlib.ticker as mticker
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import numpy as np
 import polars as pl
 from scipy.interpolate import griddata
@@ -70,6 +71,17 @@ from pes_analyzer.topology import (
 ASPECT_RATIO = 'equal'
 DPI = 300
 USE_FLOAT32 = True
+
+# Restrict the analysis to the (c, a3, a4) subspace: keep only rows with every
+# parameter beyond a4 at zero (a5 = a6 = a7 = a8 = 0). Comparing runs with this
+# on and off isolates the impact of higher-order deformations on both the
+# energy surface and the scission region.
+MASK_3D_ONLY = False
+
+# Scission-overlay semantics. True: shade a pixel when ANY shape in its
+# minimized-out column is scissioning. False: shade only when the displayed
+# (min-energy) configuration itself is scissioning.
+SCISSION_FULL = True
 
 # Axes that may be active. The actual active set is auto-detected per file
 # from the parquet contents (any column with >1 unique value).
@@ -280,7 +292,8 @@ def detect_active_axes(df: pl.DataFrame) -> tuple[str, ...]:
 
 def build_grids(
     df: pl.DataFrame, active_axes: tuple[str, ...]
-) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, float], dict[str, np.ndarray]]:
+) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, float],
+           dict[str, np.ndarray], Optional[np.ndarray]]:
     """Dense N-D energy grid + component grids + inactive-axis constants.
 
     Parameters
@@ -303,6 +316,9 @@ def build_grids(
     components
         {'mass_excess': ndarray, 'macro_energy': ndarray, ...}, one per
         present energy-component column. Same shape as `energies`.
+    scission_grid
+        0/1/NaN grid from `is_scissioning` (same shape as `energies`),
+        or None when the parquet predates the neck columns.
     """
     coords = {name: df[name].to_numpy() for name in active_axes}
     values = df['total_energy'].to_numpy()
@@ -316,17 +332,51 @@ def build_grids(
             comp_dense, _ = build_dense(coords, cvals)
             components[cname] = comp_dense
 
+    scission_grid: Optional[np.ndarray] = None
+    if 'is_scissioning' in df.columns:
+        sc_vals = df['is_scissioning'].cast(pl.Float64).to_numpy()
+        scission_grid, _ = build_dense(coords, sc_vals)
+
     inactive_axes: dict[str, float] = {}
     for name in CANDIDATE_AXES:
         if name not in active_axes and name in df.columns:
             inactive_axes[name] = float(df[name].unique().to_numpy()[0])
 
-    return energies, axes, inactive_axes, components
+    return energies, axes, inactive_axes, components, scission_grid
 
 
 # =============================================================================
 # FILE I/O
 # =============================================================================
+
+NECK_COLUMNS = ('has_neck', 'neck_radius', 'is_scissioning')
+
+
+def verify_scission_band(df: pl.DataFrame, out: TextIO = sys.stdout) -> None:
+    """Check the scission-band invariant on the valid-filtered frame.
+
+    Per docs/2026-06-11-parquet-neck-columns.md: every valid scissioning row
+    must have 1.2 < neck_radius < 1.5 fm, and on necked rows the scission
+    label must match the 1.5 fm threshold. Violations warn instead of raising
+    so one bad map cannot kill a batch run.
+    """
+    sciss = df.filter(pl.col('is_scissioning'))
+    n_sciss = len(sciss)
+    if n_sciss == 0:
+        print("    Scission check: no scissioning rows", file=out)
+        return
+    radius = sciss['neck_radius']
+    out_of_band = int(((radius <= 1.2) | (radius >= 1.5)).sum())
+    necked = df.filter(pl.col('has_neck'))
+    mislabeled = int((necked['is_scissioning'] != (necked['neck_radius'] < 1.5)).sum())
+    if out_of_band == 0 and mislabeled == 0:
+        print(f"    Scission check PASS: {n_sciss:,} scissioning rows, "
+              f"neck_radius in ({radius.min():.4f}, {radius.max():.4f}) fm", file=out)
+    else:
+        print(f"    Scission check WARNING: {out_of_band:,} of {n_sciss:,} scissioning "
+              f"rows outside (1.2, 1.5) fm; {mislabeled:,} necked rows with "
+              f"label/threshold mismatch", file=out)
+
 
 def read_parquet_file(filename: str | Path, out: TextIO = sys.stdout) -> pl.DataFrame:
     """Read the Parquet file and extract relevant columns for analysis."""
@@ -357,6 +407,14 @@ def read_parquet_file(filename: str | Path, out: TextIO = sys.stdout) -> pl.Data
         if missing:
             print(f"    Note: Missing columns (will be NaN): {missing}", file=out)
 
+        # Neck/scission columns exist only in maps generated from 2026-06-11 on.
+        has_neck_cols = set(NECK_COLUMNS) <= set(available_columns)
+        if has_neck_cols:
+            columns_to_read += list(NECK_COLUMNS)
+        else:
+            print("    Note: no neck/scission columns (pre-2026-06-11 map); "
+                  "scission overlay disabled", file=out)
+
         df = pl.read_parquet(filepath, columns=columns_to_read)
         read_time = time.time() - start_time
         print(f"    Read {len(df):,} rows in {read_time:.1f} seconds", file=out)
@@ -370,6 +428,9 @@ def read_parquet_file(filename: str | Path, out: TextIO = sys.stdout) -> pl.Data
                   f"({initial_count - filtered_count:,} invalid removed)", file=out)
             df = df.drop('is_valid')
 
+        if has_neck_cols:
+            verify_scission_band(df, out=out)
+
         # Filter out rows with extremely low total_energy (likely invalid)
         if 'total_energy' in df.columns:
             before_energy_filter = len(df)
@@ -381,6 +442,14 @@ def read_parquet_file(filename: str | Path, out: TextIO = sys.stdout) -> pl.Data
 
         # Apply parameter limits
         df = apply_parameter_limits(df, out=out)
+
+        if MASK_3D_ONLY:
+            higher = [ax for ax in ('a5', 'a6', 'a7', 'a8') if ax in df.columns]
+            before = len(df)
+            df = df.filter(pl.all_horizontal(
+                [pl.col(ax).abs() < 1e-12 for ax in higher]))
+            print(f"    3D-only mask ({' = '.join(higher)} = 0): "
+                  f"{before:,} -> {len(df):,} points", file=out)
 
         # Convert to float32 if configured
         if USE_FLOAT32:
@@ -447,6 +516,51 @@ def minimize_to_2d(
     energy_2d = np.take_along_axis(flat, argmin_flat[..., None], -1).squeeze(-1)
     energy_2d[all_nan] = np.nan
     return axes[x_axis], axes[y_axis], energy_2d, argmin_flat
+
+
+def gather_at_argmin_2d(
+    grid: np.ndarray,
+    axes: dict[str, np.ndarray],
+    x_axis: str,
+    y_axis: str,
+    argmin_flat: np.ndarray,
+) -> np.ndarray:
+    """Sample a parallel N-D grid at the cells selected by minimize_to_2d.
+
+    Applies the same transpose+reshape as minimize_to_2d and gathers with its
+    argmin_flat, so the result at (x, y) is the grid's value at the 5D point
+    that provides the displayed minimum energy. Values are undefined where
+    the projected energy is NaN; caller must mask.
+    """
+    axes_idx = {n: i for i, n in enumerate(axes)}
+    order = [axes_idx[x_axis], axes_idx[y_axis]] + [
+        i for i, n in enumerate(axes) if n not in (x_axis, y_axis)
+    ]
+    moved = grid.transpose(order)
+    flat = moved.reshape(moved.shape[0], moved.shape[1], -1)
+    return np.take_along_axis(flat, argmin_flat[..., None], -1).squeeze(-1)
+
+
+def project_any_2d(
+    grid: np.ndarray,
+    axes: dict[str, np.ndarray],
+    x_axis: str,
+    y_axis: str,
+) -> np.ndarray:
+    """Project an N-D 0/1/NaN mask to 2D: True at (x, y) iff ANY cell in the
+    column over the remaining axes is set. NaN counts as unset.
+
+    Companion to gather_at_argmin_2d with SCISSION_FULL semantics: shows
+    where scissioning shapes exist at all, not just where the min-energy
+    configuration is scissioning. Same axis ordering as minimize_to_2d.
+    """
+    axes_idx = {n: i for i, n in enumerate(axes)}
+    order = [axes_idx[x_axis], axes_idx[y_axis]] + [
+        i for i, n in enumerate(axes) if n not in (x_axis, y_axis)
+    ]
+    moved = grid.transpose(order)
+    flat = moved.reshape(moved.shape[0], moved.shape[1], -1)
+    return (np.where(np.isnan(flat), 0.0, flat) > 0.5).any(axis=-1)
 
 
 def save_minimized_data_2d(
@@ -836,6 +950,7 @@ def run_critical_point_analysis_nd(
     dict[str, np.ndarray],
     dict[str, float],
     dict[str, np.ndarray],
+    Optional[np.ndarray],
     "MergeTree",
     dict,
 ]:
@@ -844,7 +959,8 @@ def run_critical_point_analysis_nd(
     The library does the physics-free part (extrema, watershed, merge tree);
     the GS / SM / FE identification is composed here from neutral primitives.
 
-    Returns critical_points, energies, axes, inactive_axes, components, tree.
+    Returns critical_points, energies, axes, inactive_axes, components,
+    scission_grid, tree, sel.
     """
     print("\n  --- Critical Point Analysis (N-D) ---", file=out)
     t_total = time.perf_counter()
@@ -854,7 +970,7 @@ def run_critical_point_analysis_nd(
 
     print("\n  Step 0: Building dense grid", file=out)
     t0 = time.perf_counter()
-    energies, axes, inactive_axes, components = build_grids(df, active_axes)
+    energies, axes, inactive_axes, components, scission_grid = build_grids(df, active_axes)
     print(f"    Grid shape: {energies.shape}; "
           f"non-NaN cells: {int(np.count_nonzero(~np.isnan(energies))):,}", file=out)
     print(f"  [time] Step 0 (build grid): {time.perf_counter() - t0:.2f} s", file=out)
@@ -957,7 +1073,8 @@ def run_critical_point_analysis_nd(
 
     print(f"\n  [time] Total critical point analysis: "
           f"{time.perf_counter() - t_total:.2f} s", file=out)
-    return critical_points, energies, axes, inactive_axes, components, tree, sel
+    return (critical_points, energies, axes, inactive_axes, components,
+            scission_grid, tree, sel)
 
 
 # =============================================================================
@@ -1462,12 +1579,15 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
                         critical_points: Optional[dict] = None,
                         vmin: float = None, vmax: float = None,
                         y_param: str = 'a4',
+                        scission: Optional[np.ndarray] = None,
                         out: TextIO = sys.stdout):
     """Create a c vs y contour plot with critical points marked.
 
     Args:
         y_param: 'a4' or 'a3' — controls y-axis label, tick spacing,
                  and which coordinate to read from critical points.
+        scission: optional bool array aligned with c/y/energy; True points
+                  are shaded black with alpha (the scission region).
     """
     if vmin is None:
         vmin = energy.min()
@@ -1500,6 +1620,14 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
     zi = gaussian_filter(zi, sigma=2.0)
     zi[hole_mask] = np.nan
 
+    # Scission mask on the same fine grid. Nearest-neighbour keeps the 0/1
+    # field crisp (cubic would ring at the boundary); holes stay unshaded.
+    sc_mask = None
+    if scission is not None and scission.any():
+        sc_fine = griddata((c, y), scission.astype(np.float64), (ci, yi),
+                           method='nearest')
+        sc_mask = (sc_fine > 0.5) & ~hole_mask
+
     cmap, norm, boundaries = create_discrete_colormap(vmin, vmax)
     contour_levels = np.arange(np.floor(vmin), np.ceil(vmax) + 1, 1.0)
 
@@ -1514,6 +1642,10 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
         cf = ax.contourf(ci, yi, zi, levels=boundaries[:-1], cmap=cmap, norm=norm, extend='max')
         cs = ax.contour(ci, yi, zi, levels=contour_levels, colors='black', linewidths=1.5, alpha=0.8)
         ax.clabel(cs, inline=True, fontsize=12, fmt='%0.0f')
+
+        if sc_mask is not None:
+            ax.contourf(ci, yi, sc_mask.astype(float), levels=[0.5, 1.5],
+                        colors='black', alpha=0.35, zorder=3)
 
         # Plot critical points
         if critical_points:
@@ -1538,7 +1670,13 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
 
             # Add legend only on c vs a4 map (shown in tandem with c vs a3)
             if y_param != 'a3':
-                ax.legend(loc='lower right', fontsize=10, framealpha=0.95)
+                # contourf is not auto-collected into the legend; add a proxy.
+                handles, _ = ax.get_legend_handles_labels()
+                if sc_mask is not None:
+                    handles.append(Patch(facecolor='black', alpha=0.35,
+                                         label='Scission ($r_{neck}$ < 1.5 fm)'))
+                ax.legend(handles=handles, loc='lower right', fontsize=10,
+                          framealpha=0.95)
 
         # Labels and formatting
         y_subscript = '3' if y_param == 'a3' else '4'
@@ -1599,7 +1737,7 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
 
     df = read_parquet_file(parquet_file, out=out)
 
-    critical_points, energies, axes, inactive_axes, components, tree, sel = \
+    critical_points, energies, axes, inactive_axes, components, scission_grid, tree, sel = \
         run_critical_point_analysis_nd(df, out=out)
 
     print_analysis_summary(critical_points, nucleus, out=out)
@@ -1638,8 +1776,16 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
         c_flat = c_grid[mask]
         y_flat = y_grid[mask]
         e_flat = e2d[mask]
+        scission_flat = None
+        if scission_grid is not None:
+            if SCISSION_FULL:
+                scission_flat = project_any_2d(scission_grid, axes, 'c', y_axis)[mask]
+            else:
+                sc2d = gather_at_argmin_2d(scission_grid, axes, 'c', y_axis, argmin_flat)
+                scission_flat = (np.where(np.isnan(sc2d), 0.0, sc2d) > 0.5)[mask]
         create_contour_plot(c_flat, y_flat, e_flat, nucleus, output_filename,
-                            critical_points, y_param=y_axis, out=out)
+                            critical_points, y_param=y_axis,
+                            scission=scission_flat, out=out)
 
     barriers = calculate_fission_barriers(critical_points, nucleus)
 
@@ -1818,6 +1964,8 @@ The program will:
     print(f"  Critical point analysis: N-D (auto-detected axes)")
     print(f"  Output DPI: {DPI}")
     print(f"  Ground state c threshold: {GROUND_STATE_C_THRESHOLD}")
+    print(f"  3D-only mask (a5=a6=a7=a8=0): {MASK_3D_ONLY}")
+    print(f"  Scission overlay: {'any shape in column' if SCISSION_FULL else 'min-energy configuration'}")
     print("=" * 70)
 
     # Determine files to process
