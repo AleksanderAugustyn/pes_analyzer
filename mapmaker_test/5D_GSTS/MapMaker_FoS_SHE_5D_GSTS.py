@@ -177,6 +177,10 @@ class CriticalPoint:
     name: str
     point: GridPoint = field(default_factory=GridPoint)
     found: bool = False
+    basin_id: Optional[int] = None      # minima only: watershed basin id
+    basin_persistence: float = np.nan   # MeV; NaN for saddles and undying root basin
+    profile_well_depth: float = np.nan  # MeV; 1-D path diagnostic (spec 5.5)
+    segment: str = ""                   # saddles only: "gs-sm", "sm-tm", "tm-fe", ...
 
 
 @dataclass
@@ -1049,6 +1053,31 @@ def run_critical_point_analysis_nd(
         CriticalPointType.THIRD_SADDLE:      _to_cp(CriticalPointType.THIRD_SADDLE,      "Third Saddle",      third_idx, third_e),
     }
 
+    # Basin-level facts for the CSV (spec 5.6). Persistence comes from the
+    # UNPRUNED tree; an undying root basin (inf) becomes NaN -> empty cell.
+    min_roles = {
+        CriticalPointType.GROUND_STATE:      "ground_state",
+        CriticalPointType.SECONDARY_MINIMUM: "secondary_minimum",
+        CriticalPointType.THIRD_MINIMUM:     "third_minimum",
+        CriticalPointType.FISSION_EXIT:      "fission_exit",
+    }
+    for cp_type, sel_key in min_roles.items():
+        bid = sel[sel_key]
+        if bid is None:
+            continue
+        cp = critical_points[cp_type]
+        cp.basin_id = bid
+        pers = float(tree.node(bid).persistence)
+        cp.basin_persistence = pers if np.isfinite(pers) else float('nan')
+        cp.profile_well_depth = float(sel["well_depths"].get(sel_key, float('nan')))
+    saddle_roles = {
+        CriticalPointType.FIRST_SADDLE:  "inner_saddle",
+        CriticalPointType.SECOND_SADDLE: "outer_saddle",
+        CriticalPointType.THIRD_SADDLE:  "third_saddle",
+    }
+    for cp_type, sel_key in saddle_roles.items():
+        critical_points[cp_type].segment = sel["saddle_segments"].get(sel_key, "")
+
     print(f"\n  [time] Total critical point analysis: "
           f"{time.perf_counter() - t_total:.2f} s", file=out)
     return (critical_points, energies, axes, inactive_axes, components,
@@ -1065,6 +1094,7 @@ def run_critical_point_analysis_nd(
 
 def save_critical_points_csv(critical_points: dict[CriticalPointType, CriticalPoint],
                              nucleus: NucleusInfo, output_dir: str = 'critical_points',
+                             gs_persistence_bf: Optional[float] = None,
                              out: TextIO = sys.stdout) -> Path:
     """Save critical points to a CSV file."""
     output_path = Path(output_dir)
@@ -1092,6 +1122,13 @@ def save_critical_points_csv(critical_points: dict[CriticalPointType, CriticalPo
                 'micro_energy': cp.point.micro_energy,
                 'surface_energy': cp.point.surface_energy,
                 'coulomb_energy': cp.point.coulomb_energy,
+                'basin_id': cp.basin_id,
+                'basin_persistence': None if np.isnan(cp.basin_persistence)
+                                     else float(cp.basin_persistence),
+                'profile_well_depth': None if np.isnan(cp.profile_well_depth)
+                                      else float(cp.profile_well_depth),
+                'segment': cp.segment or None,
+                'gs_persistence_bf': gs_persistence_bf,
             })
 
     if not rows:
@@ -1753,7 +1790,8 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
         run_critical_point_analysis_nd(df, out=out)
 
     print_analysis_summary(critical_points, nucleus, out=out)
-    save_critical_points_csv(critical_points, nucleus, out=out)
+    save_critical_points_csv(critical_points, nucleus,
+                             gs_persistence_bf=sel["gs_persistence_bf"], out=out)
     save_basins_csv(tree, axes, nucleus, out=out)
     plot_persistence_histogram(
         tree, nucleus,

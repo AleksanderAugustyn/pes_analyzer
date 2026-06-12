@@ -228,3 +228,52 @@ def test_sideways_leak_rejected_by_persistence_not_profile_depth(mm):
     assert sel["inner_saddle"][1] == pytest.approx(6.0)
     assert sel["outer_saddle"] is None
     assert sel["saddle_segments"]["inner_saddle"] == "gs-fe"
+
+
+def test_csv_gains_basin_columns(mm, tmp_path):
+    """Spec 5.6: minima rows carry basin_id / basin_persistence /
+    profile_well_depth; saddle rows carry segment; gs_persistence_bf is a
+    per-nucleus column. Empty persistence = undying root basin."""
+    nucleus = mm.NucleusInfo(Z=111, N=165, A=276, symbol="Rg",
+                             isotope_label="276Rg")
+
+    gs = mm.CriticalPoint(mm.CriticalPointType.GROUND_STATE, "Ground State")
+    gs.point = mm.GridPoint(c=1.05, total_energy=-5.93, valid=True)
+    gs.found = True
+    gs.basin_id = 17
+    gs.basin_persistence = 5.70
+    gs.profile_well_depth = 5.95
+
+    fe = mm.CriticalPoint(mm.CriticalPointType.FISSION_EXIT, "Fission Exit")
+    fe.point = mm.GridPoint(c=2.3, total_energy=-9.1, valid=True)
+    fe.found = True
+    fe.basin_id = 0
+    fe.basin_persistence = float('nan')   # root basin: never dies -> empty cell
+
+    sad = mm.CriticalPoint(mm.CriticalPointType.FIRST_SADDLE, "Inner Saddle")
+    sad.point = mm.GridPoint(c=1.3, total_energy=-0.23, valid=True)
+    sad.found = True
+    sad.segment = "gs-sm"
+
+    cps = {cp.point_type: cp for cp in (gs, fe, sad)}
+    out_file = mm.save_critical_points_csv(
+        cps, nucleus, output_dir=str(tmp_path),
+        gs_persistence_bf=5.70, out=io.StringIO())
+
+    df = pl.read_csv(out_file)
+    for colname in ("basin_id", "basin_persistence", "profile_well_depth",
+                    "segment", "gs_persistence_bf"):
+        assert colname in df.columns, colname
+
+    gs_row = df.filter(pl.col("point_type") == "Ground State")
+    assert gs_row["basin_id"][0] == 17
+    assert gs_row["basin_persistence"][0] == pytest.approx(5.70)
+    assert gs_row["profile_well_depth"][0] == pytest.approx(5.95)
+    assert gs_row["gs_persistence_bf"][0] == pytest.approx(5.70)
+
+    fe_row = df.filter(pl.col("point_type") == "Fission Exit")
+    assert fe_row["basin_persistence"][0] is None
+
+    sad_row = df.filter(pl.col("point_type") == "Inner Saddle")
+    assert sad_row["segment"][0] == "gs-sm"
+    assert sad_row["basin_id"][0] is None
