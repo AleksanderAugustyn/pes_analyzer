@@ -121,6 +121,48 @@ def test_collect_candidates_excludes_fission_exit_basin(mm):
     assert 5 not in by_k                         # endpoint excluded entirely
 
 
+def _fragmented_tree():
+    """1-D map, 8 cells: a sub-noise satellite fragment of a deeper well.
+
+    cells:   0    1    2    3    4    5    6    7
+    labels:  1    1    3    3    2    2    0    0
+    basin 1: GS,        seed cell 0, E=0.0,  dies at 5.0  -> pers 5.0
+    basin 3: satellite, seed cell 2, E=1.05, dies at 1.15 -> pers 0.10
+    basin 2: well,      seed cell 4, E=1.0,  dies at 4.0  -> pers 3.0
+    basin 0: FE (root), seed cell 7, E=-2.0
+    """
+    labels = np.array([1, 1, 3, 3, 2, 2, 0, 0], dtype=np.int32)
+    basins = [((7,), -2.0), ((0,), 0.0), ((4,), 1.0), ((2,), 1.05)]
+    merges = [((3,), 1.15, 2, 3), ((5,), 4.0, 0, 2), ((1,), 5.0, 0, 1)]
+    return MergeTree(labels, basins, merges)
+
+
+def test_collect_candidates_reanchors_subnoise_satellite(mm):
+    """A basin dying through a merge shallower than the profile noise floor
+    is a satellite fragment of a larger well: identity and energy re-anchor
+    to the merge parent (the 232Th case: MEP bottoms in a 0.09 MeV ripple
+    two steps from the true SM seed)."""
+    tree = _fragmented_tree()
+    path_cells = [0, 1, 2, 5, 6, 7]   # bottoms in the satellite (cell 2)
+    path_idx = np.array([[c] for c in path_cells], dtype=np.int64)
+    profile = PathProfile(
+        minima=[(0, 0.0), (2, 1.05), (5, -2.0)],
+        saddles=[(1, 5.0), (3, 4.0)],
+    )
+    interior = mm._collect_mep_candidates(
+        profile, path_idx, tree, gs_basin=1, fe_basin=0, reanchor_floor=0.4)
+    assert len(interior) == 1
+    k, e, bid, skip = interior[0]
+    assert (k, bid, skip) == (2, 2, None)   # satellite #3 -> well #2
+    assert e == pytest.approx(1.0)          # representative's minimum energy
+
+    # without a floor the satellite keeps its own id (and its own energy)
+    interior0 = mm._collect_mep_candidates(
+        profile, path_idx, tree, gs_basin=1, fe_basin=0)
+    assert interior0[0][2] == 3
+    assert interior0[0][1] == pytest.approx(1.05)
+
+
 def _axes_for(shape):
     """Synthetic physical axes: c along axis 0 (0.8 + 0.1*i, so row 0 is
     inside the GS region c < 1.4), a4 along axis 1."""
@@ -228,6 +270,44 @@ def test_sideways_leak_rejected_by_persistence_not_profile_depth(mm):
     assert sel["inner_saddle"][1] == pytest.approx(6.0)
     assert sel["outer_saddle"] is None
     assert sel["saddle_segments"]["inner_saddle"] == "gs-fe"
+
+
+def _fragmented_well_grid():
+    """232Th-like sub-noise fragmentation (spec 5.2 re-anchoring).
+
+    Path corridor is column 1. The MEP bottoms in a satellite basin at
+    (2,1)=2.05 whose only escape below the path barriers is a 2.15 MeV
+    ripple cell (2,2) into the true well seed (2,3)=2.0 one step off-path:
+
+      satellite persistence 2.15 - 2.05 = 0.10 < MEP_PERSISTENCE (0.4)
+      well       persistence 4.0  - 2.0  = 2.0  >= SM_PERSISTENCE (1.0)
+
+    Without re-anchoring the SM is rejected (0.10 < 1.0) and the deep well
+    is lost; with re-anchoring the SM is the off-path well seed.
+    """
+    e = np.full((12, 4), 9.0)
+    e[:, 1] = [0.0, 6.0, 2.05, 4.0, 1.0, -0.5,
+               -1.0, -1.5, -2.0, -2.5, -2.8, -3.0]
+    e[2, 2] = 2.15
+    e[2, 3] = 2.0
+    return e
+
+
+def test_fragmented_well_reanchored_to_true_seed(mm):
+    energies = _fragmented_well_grid()
+    sel, tree, log = _run_selection(
+        mm, energies, [((0, 1), 0.0), ((2, 3), 2.0)])
+
+    # SM identity is the re-anchored well, seeded one step OFF the path
+    assert sel["secondary_minimum"] == tree.basin_of_point((2, 3))
+    assert sel["secondary_minimum"] != tree.basin_of_point((2, 1))
+    assert tree.node(sel["secondary_minimum"]).minimum_index == (2, 3)
+    assert "re-anchored" in log
+
+    assert sel["inner_saddle"][1] == pytest.approx(6.0)
+    assert sel["outer_saddle"][1] == pytest.approx(4.0)
+    assert sel["saddle_segments"] == {
+        "inner_saddle": "gs-sm", "outer_saddle": "sm-fe"}
 
 
 def test_csv_gains_basin_columns(mm, tmp_path):

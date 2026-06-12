@@ -705,24 +705,36 @@ def _mep_reject_reason(k: int, e: float, prev_e: float, gs_e: float,
     return None
 
 
-def _collect_mep_candidates(profile, path_idx, tree, gs_basin, fe_basin):
+def _collect_mep_candidates(profile, path_idx, tree, gs_basin, fe_basin,
+                            reanchor_floor=0.0):
     """Map interior profile minima to basins; flag GS/FE re-entries and revisits.
 
     Returns one ``(k, e, basin_id, skip_reason)`` tuple per interior profile
-    minimum, in path order. ``skip_reason`` None marks a classification
-    candidate: the first on-path visit of a basin that is neither the GS
-    nor the fission-exit well. By P1 every profile-minimum cell is its
-    basin's seed, so basin_of_point is exact and no proximity confirmation
-    is needed; by P2 the path is a walk that may revisit basins, hence the
-    first-visit deduplication (basin-led classification spec, section 5.2).
+    minimum, in path order; ``e`` is the basin minimum energy. ``skip_reason``
+    None marks a classification candidate: the first on-path visit of a basin
+    that is neither the GS nor the fission-exit well. By P1 every
+    profile-minimum cell is its basin's seed, so basin_of_point is exact and
+    no proximity confirmation is needed; by P2 the path is a walk that may
+    revisit basins, hence the first-visit deduplication (basin-led
+    classification spec, section 5.2).
+
+    Re-anchoring: a basin that dies through a merge shallower than
+    ``reanchor_floor`` (the MEP profile noise floor) is a sub-noise satellite
+    fragment of a larger well, not a well of its own -- identity, energy and
+    seed move to the merge parent, repeatedly (232Th: the MEP bottoms in a
+    0.09 MeV a6-ripple satellite two grid steps from the true SM seed).
     """
     last = len(path_idx) - 1
     seen = {gs_basin, fe_basin}
     out = []
-    for k, e in profile.minima:
+    for k, _e_path in profile.minima:
         if k in (0, last):
             continue
         bid = tree.basin_of_point(tuple(int(v) for v in path_idx[k]))
+        while (tree.node(bid).persistence < reanchor_floor
+               and tree.node(bid).parent is not None):
+            bid = tree.node(bid).parent
+        e = float(tree.node(bid).minimum_energy)
         if bid == gs_basin:
             skip = "GS basin, skipped"
         elif bid == fe_basin:
@@ -813,7 +825,8 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
         return barrier - all_ext[i][1]
 
     interior = _collect_mep_candidates(
-        profile, path_idx, tree, sel["ground_state"], sel["fission_exit"])
+        profile, path_idx, tree, sel["ground_state"], sel["fission_exit"],
+        reanchor_floor=MEP_PERSISTENCE)
 
     # Walk interior minima in path order: the first candidate passing the
     # SM conditions is the secondary minimum; the first one after it
@@ -841,8 +854,14 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
             verdict = "[SM and TM already assigned]"
         print(f"      interior minimum: step {k} "
               f"{_format_coords(grid_pt(k)[0], axes)} E={e:.4f}", file=out)
+        on_path_bid = tree.basin_of_point(grid_pt(k)[0])
+        anchor_note = ("" if on_path_bid == bid else
+                       f"  (re-anchored from satellite basin #{on_path_bid}, "
+                       f"pers {tree.node(on_path_bid).persistence:.2f} "
+                       f"< {MEP_PERSISTENCE})")
         print(f"          basin #{bid}  persistence={pers:.2f} MeV  "
-              f"profile-depth={well_depth(k):.2f} MeV  {verdict}", file=out)
+              f"profile-depth={well_depth(k):.2f} MeV  {verdict}{anchor_note}",
+              file=out)
         if label == "SM":
             sm = (k, e, bid)
         elif label == "TM":
