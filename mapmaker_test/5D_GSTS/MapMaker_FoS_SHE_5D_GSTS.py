@@ -1720,6 +1720,7 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
                         vmin: float = None, vmax: float = None,
                         y_param: str = 'a4',
                         scission: Optional[np.ndarray] = None,
+                        mep: Optional[tuple[np.ndarray, np.ndarray]] = None,
                         out: TextIO = sys.stdout):
     """Create a c vs y contour plot with critical points marked.
 
@@ -1728,6 +1729,8 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
                  and which coordinate to read from critical points.
         scission: optional bool array aligned with c/y/energy; True points
                   are shaded black with alpha (the scission region).
+        mep: optional (c, y) coordinate arrays of the minimum-energy path,
+             projected onto this map's two axes.
     """
     if vmin is None:
         vmin = energy.min()
@@ -1787,6 +1790,16 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
             ax.contourf(ci, yi, sc_mask.astype(float), levels=[0.5, 1.5],
                         colors='black', alpha=0.35, zorder=3)
 
+        # MEP projected onto this map's axes. The path lives on the full N-D
+        # grid while the map is minimized over the other axes, so it can
+        # stray off the displayed valley floor — that is real information,
+        # not a bug. Red stays visible: high-energy red regions are where
+        # the path never goes.
+        if mep is not None:
+            mep_c, mep_y = mep
+            ax.plot(mep_c, mep_y, color='red', lw=1.8, ls=(0, (3, 1.5)),
+                    zorder=8, label='MEP')
+
         # Plot critical points
         if critical_points:
             marker_styles = {
@@ -1815,8 +1828,8 @@ def create_contour_plot(c: np.ndarray, y: np.ndarray, energy: np.ndarray,
                 if sc_mask is not None:
                     handles.append(Patch(facecolor='black', alpha=0.35,
                                          label='Scission ($r_{neck}$ < 1.5 fm)'))
-                ax.legend(handles=handles, loc='lower right', fontsize=10,
-                          framealpha=0.95)
+                ax.legend(handles=handles, loc='lower right', fontsize=5,
+                          markerscale=0.5, framealpha=0.95)
 
         # Labels and formatting
         y_subscript = '3' if y_param == 'a3' else '4'
@@ -1922,6 +1935,11 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
         c_flat = c_grid[mask]
         y_flat = y_grid[mask]
         e_flat = e2d[mask]
+        mep_proj = None
+        if mep_idx is not None:
+            axis_names = list(axes)
+            mep_proj = (axes['c'][mep_idx[:, axis_names.index('c')]],
+                        axes[y_axis][mep_idx[:, axis_names.index(y_axis)]])
         scission_flat = None
         if scission_grid is not None:
             if SCISSION_FULL:
@@ -1931,7 +1949,7 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
                 scission_flat = (np.where(np.isnan(sc2d), 0.0, sc2d) > 0.5)[mask]
         create_contour_plot(c_flat, y_flat, e_flat, nucleus, output_filename,
                             critical_points, y_param=y_axis,
-                            scission=scission_flat, out=out)
+                            scission=scission_flat, mep=mep_proj, out=out)
 
     barriers = calculate_fission_barriers(critical_points, nucleus)
 
