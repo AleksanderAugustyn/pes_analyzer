@@ -23,6 +23,15 @@ def find_minimum_energy_path(
     neighborhood: str = ...,
 ) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]] | None: ...
 
+class PathProfile:
+    minima: list[tuple[int, float]]
+    saddles: list[tuple[int, float]]
+
+def analyze_path_profile(
+    path_energies: npt.NDArray[np.float64],
+    min_persistence: float = ...,
+) -> PathProfile: ...
+
 def compute_persistence(
     basins: list[tuple[tuple[int, ...], float]],
     merges: list[tuple[tuple[int, ...], float, int, int]],

@@ -141,3 +141,59 @@ def test_non_contiguous_raises():
     assert not e.flags.c_contiguous
     with pytest.raises(ValueError, match="C-contiguous"):
         find_minimum_energy_path(e, (0, 0), (4, 3))
+
+
+# -------- analyze_path_profile (pure Python) ---------------------------------
+
+from pes_analyzer.topology import PathProfile, analyze_path_profile  # noqa: E402
+
+
+def test_profile_alternating_extrema():
+    prof = analyze_path_profile(np.array([0.0, 2.0, 1.0, 3.0, -1.0]))
+    assert prof.minima == [(0, 0.0), (2, 1.0), (4, -1.0)]
+    assert prof.saddles == [(1, 2.0), (3, 3.0)]
+
+
+def test_profile_persistence_prunes_shallow_pair():
+    prof = analyze_path_profile(
+        np.array([0.0, 2.0, 1.0, 3.0, -1.0]), min_persistence=1.5
+    )
+    assert prof.minima == [(0, 0.0), (4, -1.0)]
+    assert prof.saddles == [(3, 3.0)]
+
+
+def test_profile_flat_is_single_minimum():
+    prof = analyze_path_profile(np.array([1.0, 1.0, 1.0]))
+    assert prof.minima == [(0, 1.0)]
+    assert prof.saddles == []
+
+
+def test_profile_single_point():
+    prof = analyze_path_profile(np.array([5.0]))
+    assert prof.minima == [(0, 5.0)]
+    assert prof.saddles == []
+
+
+def test_profile_plateau_extremum_uses_last_plateau_cell():
+    prof = analyze_path_profile(np.array([0.0, 2.0, 2.0, 1.0, 3.0]))
+    assert prof.saddles[0] == (2, 2.0)
+
+
+def test_profile_global_minimum_survives_aggressive_pruning():
+    prof = analyze_path_profile(
+        np.array([0.0, 0.2, -5.0, 0.1, 0.05]), min_persistence=10.0
+    )
+    assert prof.minima == [(2, -5.0)]
+
+
+def test_profile_monotone_rise_keeps_start_minimum():
+    prof = analyze_path_profile(np.array([0.0, 1.0, 2.0, 3.0]))
+    assert prof.minima == [(0, 0.0)]
+    assert prof.saddles == [(3, 3.0)]
+
+
+def test_profile_rejects_nan_and_empty():
+    with pytest.raises(ValueError):
+        analyze_path_profile(np.array([0.0, np.nan]))
+    with pytest.raises(ValueError):
+        analyze_path_profile(np.array([]))
