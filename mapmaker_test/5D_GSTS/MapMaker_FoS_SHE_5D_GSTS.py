@@ -774,14 +774,16 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
     fission_exit; (index, energy) tuples for inner/outer/third saddles;
     plus ``gs_persistence_bf`` (GS basin persistence = minimax barrier
     height, None while unknown or for an undying GS root basin),
-    ``saddle_segments`` (saddle key -> "gs-sm" style segment name), and
-    ``well_depths`` (role -> 1-D profile escape depth, diagnostic only).
+    ``saddle_segments`` (saddle key -> "gs-sm" style segment name),
+    ``well_depths`` (role -> 1-D profile escape depth, diagnostic only),
+    and ``mep_steps`` (role -> path step of the marker on the MEP profile).
     """
     sel = {
         "ground_state": None, "secondary_minimum": None, "third_minimum": None,
         "fission_exit": None, "inner_saddle": None, "outer_saddle": None,
         "third_saddle": None,
         "gs_persistence_bf": None, "saddle_segments": {}, "well_depths": {},
+        "mep_steps": {},
     }
     c_pos = list(axes).index('c')
     c_lo, c_hi = float(axes['c'][0]), float(axes['c'][-1])
@@ -832,6 +834,8 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
 
     last = len(path_e) - 1
     gs_e = float(path_e[0])
+    sel["mep_steps"]["ground_state"] = 0
+    sel["mep_steps"]["fission_exit"] = last
 
     # 1-D escape depth along the path: DIAGNOSTIC only. Persistence is the
     # authority for significance; profile depth >= persistence always, and
@@ -900,9 +904,11 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
     if sm is not None:
         sel["secondary_minimum"] = sm[2]
         sel["well_depths"]["secondary_minimum"] = well_depth(sm[0])
+        sel["mep_steps"]["secondary_minimum"] = sm[0]
     if tm is not None:
         sel["third_minimum"] = tm[2]
         sel["well_depths"]["third_minimum"] = well_depth(tm[0])
+        sel["mep_steps"]["third_minimum"] = tm[0]
     sel["well_depths"]["ground_state"] = well_depth(0)
 
     # GS basin persistence = minimax fission-barrier height from the GS
@@ -933,6 +939,7 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
             k_max, _e_max = max(segment, key=lambda t: t[1])
             sel[key] = grid_pt(k_max)
             sel["saddle_segments"][key] = f"{name_a}-{name_b}"
+            sel["mep_steps"][key] = k_max
     return sel, path_idx, path_e, profile
 
 
@@ -1480,33 +1487,70 @@ def _draw_merge_tree_panel(ax, tree, displayed_ids, roles, axes, c_pos,
     return annotations
 
 
-def plot_mep_profile(mep_idx, mep_e, profile, axes, nucleus, output_filename,
-                     out=sys.stdout):
+def plot_mep_profile(mep_idx, mep_e, profile, axes, sel, tree, nucleus,
+                     output_filename, out=sys.stdout):
     """1-D energy profile along the MEP with critical points marked.
 
-    X axis is the path step; markers annotate the elongation c and energy
-    of each surviving profile minimum (green, below) and saddle (red,
-    above). The MEP runs from the ground state to the fission exit.
+    X axis is the path step. Named critical points (from ``sel``) use the
+    same marker styles and legend labels as the contour maps; unnamed
+    profile extrema keep generic green/red triangles. Every extremum is
+    annotated with its elongation c and energy. A named minimum whose
+    basin minimum lies off the path (sub-noise re-anchoring) additionally
+    gets a shaded box with the basin minimum energy and persistence.
     """
     if mep_e is None:
         print("    No MEP to plot", file=out)
         return
     c_pos = list(axes).index('c')
     c_vals = axes['c'][mep_idx[:, c_pos]]
+    steps = sel.get("mep_steps", {})
+    min_role_at = {steps[r]: r for r in _MERGE_TREE_ROLE_STYLE if r in steps}
+    saddle_role_at = {steps[r]: r for r in _MERGE_TREE_SADDLE_STYLE if r in steps}
+
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(np.arange(len(mep_e)), mep_e, lw=1.2, color='tab:blue')
     for k, e in profile.minima:
-        ax.plot(k, e, 'v', color='tab:green', ms=9)
+        role = min_role_at.get(k)
+        if role is not None:
+            marker, color, label = _MERGE_TREE_ROLE_STYLE[role]
+            ax.plot(k, e, marker, color=color, ms=10, markeredgecolor='black',
+                    markeredgewidth=1.5, zorder=5, label=label)
+        else:
+            ax.plot(k, e, 'v', color='tab:green', ms=9)
         ax.annotate(f"c={c_vals[k]:.2f}\n{e:.2f}", (k, e), textcoords="offset points",
                     xytext=(0, -28), ha='center', fontsize=8)
+        # The path's local minimum is only the basin's seed on the MEP; after
+        # sub-noise re-anchoring the true critical point sits off the path,
+        # so show where the basin actually bottoms out and how deep it traps.
+        if role is not None:
+            node = tree.node(sel[role])
+            if tuple(int(v) for v in node.minimum_index) != \
+                    tuple(int(v) for v in mep_idx[k]):
+                pers = (f"{node.persistence:.2f}"
+                        if np.isfinite(node.persistence) else "∞")
+                ax.annotate(
+                    f"basin min: {node.minimum_energy:.2f}\nP = {pers} MeV",
+                    (k, e), textcoords="offset points", xytext=(0, -64),
+                    ha='center', fontsize=8,
+                    bbox={"boxstyle": 'round,pad=0.3', "facecolor": '0.9',
+                          "alpha": 0.85})
     for k, e in profile.saddles:
-        ax.plot(k, e, '^', color='tab:red', ms=9)
+        role = saddle_role_at.get(k)
+        if role is not None:
+            color, label = _MERGE_TREE_SADDLE_STYLE[role]
+            ax.plot(k, e, 's', color=color, ms=9, markeredgecolor='black',
+                    markeredgewidth=1.5, zorder=5, label=label)
+        else:
+            ax.plot(k, e, '^', color='tab:red', ms=9)
         ax.annotate(f"c={c_vals[k]:.2f}\n{e:.2f}", (k, e), textcoords="offset points",
                     xytext=(0, 10), ha='center', fontsize=8)
     ax.set_xlabel("MEP step")
     ax.set_ylabel("Energy (MeV)")
     ax.set_title(f"{nucleus.isotope_label}: minimum-energy path, GS → fission exit")
     ax.grid(alpha=0.3)
+    # Upper right is empty by construction: the path ends in the scission
+    # descent, so the lower right holds the FE marker and its labels.
+    ax.legend(loc='upper right', fontsize=10, framealpha=0.95)
     fig.tight_layout()
     fig.savefig(output_filename, dpi=150)
     plt.close(fig)
@@ -1850,7 +1894,7 @@ def process_single_file(parquet_file: Path, output_plot: str = None,
         f'{parquet_file.stem}_merge_tree.png', components=components, out=out,
     )
     plot_mep_profile(
-        mep_idx, mep_e, mep_profile, axes, nucleus,
+        mep_idx, mep_e, mep_profile, axes, sel, tree, nucleus,
         f'{parquet_file.stem}_mep_profile.png', out=out,
     )
 
