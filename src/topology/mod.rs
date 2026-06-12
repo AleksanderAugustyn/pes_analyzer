@@ -9,13 +9,14 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
 
-use crate::common::validate::{check_ndim, check_total_cells_fit_u32};
+use crate::common::validate::{check_ndim, check_total_cells_fit_u32, parse_neighborhood};
 
 #[pyfunction]
-#[pyo3(name = "find_watershed_segmentation")]
+#[pyo3(name = "find_watershed_segmentation", signature = (energies, neighborhood = "von_neumann"))]
 fn py_find_watershed_segmentation<'py>(
     py: Python<'py>,
     energies: PyReadonlyArrayDyn<'py, f64>,
+    neighborhood: &str,
 ) -> PyResult<(Py<PyArrayDyn<i32>>, Py<PyList>, Py<PyList>)> {
     if !energies.is_c_contiguous() {
         return Err(PyValueError::new_err(
@@ -26,9 +27,10 @@ fn py_find_watershed_segmentation<'py>(
     let ndim = arr.ndim();
     check_ndim(ndim)?;
     check_total_cells_fit_u32(arr.len())?;
+    let stencil = parse_neighborhood(neighborhood)?;
 
     let shape: Vec<usize> = arr.shape().to_vec();
-    let result = py.allow_threads(|| watershed::watershed_segmentation_inner(arr));
+    let result = py.allow_threads(|| watershed::watershed_segmentation_inner(arr, stencil));
 
     // Reshape Vec<i32> labels into an ndarray matching `energies.shape`.
     let labels_nd = Array::from_shape_vec(IxDyn(&shape), result.labels)

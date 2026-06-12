@@ -6,7 +6,7 @@
 use ndarray::ArrayViewD;
 
 use crate::common::dsu::DisjointSetUnion;
-use crate::common::nd::{axis_neighbors, compute_strides, linear_to_index};
+use crate::common::nd::{compute_strides, linear_to_index, Stencil};
 
 /// Result of a full watershed flood. See `API.md` for the semantics.
 pub struct SegmentationResult {
@@ -23,6 +23,7 @@ pub struct SegmentationResult {
 /// - `energies.len() <= u32::MAX`.
 pub fn watershed_segmentation_inner(
     energies: ArrayViewD<'_, f64>,
+    stencil: Stencil,
 ) -> SegmentationResult {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
@@ -58,7 +59,7 @@ pub fn watershed_segmentation_inner(
     let mut basins: Vec<(u32, f64)> = Vec::new();
     let mut merges: Vec<(u32, f64, u32, u32)> = Vec::new();
 
-    let mut nbrs: Vec<usize> = Vec::with_capacity(2 * shape.len());
+    let mut nbrs: Vec<usize> = Vec::new();
 
     // `sorted` is iterated by index so we can re-sort the compact remap
     // for nd-index lookup later. Indexing rather than `for &(...)` because
@@ -69,7 +70,7 @@ pub fn watershed_segmentation_inner(
         let cur_compact = remap[lin];
         processed[cur_compact as usize] = true;
 
-        axis_neighbors(lin, &shape, &strides, &mut nbrs);
+        stencil.neighbors(lin, &shape, &strides, &mut nbrs);
 
         // `my_basin` tracks the basin of the current cell's component as
         // we process neighbors. It is set on the first processed neighbor
@@ -172,7 +173,7 @@ mod tests {
         // 3x3 monotone bowl; minimum at (1,1)=0, increasing outward.
         let e = vec![5.0, 4.0, 5.0, 4.0, 0.0, 4.0, 5.0, 4.0, 5.0];
         let arr = to_dyn([3, 3], e);
-        let r = watershed_segmentation_inner(arr.view());
+        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
         assert_eq!(r.basins.len(), 1);
         assert_eq!(r.basins[0], (vec![1, 1], 0.0));
         assert!(r.merges.is_empty());
@@ -200,7 +201,7 @@ mod tests {
         e[4 * 5 + 3] = 1.0;
         e[3 * 5 + 3] = 2.0;
         let arr = to_dyn([5, 5], e);
-        let r = watershed_segmentation_inner(arr.view());
+        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
         assert_eq!(r.basins.len(), 2);
         assert_eq!(r.basins[0], (vec![4, 4], -0.1));
         assert_eq!(r.basins[1], (vec![0, 0], 0.0));
@@ -226,7 +227,7 @@ mod tests {
         //         merge (pos=6, E=6, deeper=A=0, shallower=C=2).
         let e = vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0];
         let arr = to_dyn([1, 9], e);
-        let r = watershed_segmentation_inner(arr.view());
+        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
         assert_eq!(r.basins.len(), 3);
         assert_eq!(r.basins[0], (vec![0, 0], 0.0));
         assert_eq!(r.basins[1], (vec![0, 4], 1.0));
@@ -251,7 +252,7 @@ mod tests {
             5.0, 4.0, nan, 6.0, 7.0,
         ];
         let arr = to_dyn([3, 5], e);
-        let r = watershed_segmentation_inner(arr.view());
+        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
         assert_eq!(r.basins.len(), 2);
         assert!(r.merges.is_empty());
         assert_eq!(r.basins[0], (vec![1, 1], 0.0));
@@ -272,7 +273,7 @@ mod tests {
             0.0, 5.0, 3.0, 5.0, 1.0, 5.0, 5.0, 5.0, 5.0, 5.0, 4.0, 5.0, 2.0, 5.0, 5.0,
         ];
         let arr = to_dyn([3, 5], e);
-        let r = watershed_segmentation_inner(arr.view());
+        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
         for w in r.basins.windows(2) {
             assert!(
                 w[0].1 <= w[1].1,
@@ -286,7 +287,7 @@ mod tests {
     fn labels_match_basin_indices_at_minima() {
         let e = vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0];
         let arr = to_dyn([1, 9], e);
-        let r = watershed_segmentation_inner(arr.view());
+        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
         // For each basin, the cell at its minimum index must carry that
         // basin's id in `labels` (the cell that started the basin is
         // initially labeled with the basin's own id).
@@ -302,12 +303,27 @@ mod tests {
         let nan = f64::NAN;
         let e = vec![0.0, nan, 1.0, nan, 2.0, nan, 3.0, nan, 4.0];
         let arr = to_dyn([3, 3], e);
-        let r = watershed_segmentation_inner(arr.view());
+        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
         for (i, &val) in arr.iter().enumerate() {
             if val.is_nan() {
                 assert_eq!(r.labels[i], -1);
             }
         }
+    }
+
+    #[test]
+    fn moore_stencil_merges_through_diagonal() {
+        // Same diagonal-channel grid as the iwf test. Von Neumann sees
+        // three basins (corners and centre all axis-isolated by the 9s);
+        // Moore sees two corner basins merging through the centre at E=1.
+        let e = vec![0.0, 9.0, 9.0, 9.0, 1.0, 9.0, 9.0, 9.0, 0.0];
+        let arr = to_dyn([3, 3], e);
+        let r_vn = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
+        assert_eq!(r_vn.basins.len(), 3);
+        let r_m = watershed_segmentation_inner(arr.view(), Stencil::Moore);
+        assert_eq!(r_m.basins.len(), 2);
+        assert_eq!(r_m.merges.len(), 1);
+        assert_eq!(r_m.merges[0].1, 1.0);
     }
 
     #[test]
@@ -323,7 +339,7 @@ mod tests {
             data[0] = 0.0;
             data[total - 1] = 0.0;
             let arr = Array::from_shape_vec(IxDyn(&shape), data).unwrap();
-            let r = watershed_segmentation_inner(arr.view());
+            let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
             assert_eq!(r.basins.len(), 2, "ndim={ndim}");
             assert_eq!(r.merges.len(), 1, "ndim={ndim}");
             assert_eq!(r.merges[0].1, 7.0, "ndim={ndim}");

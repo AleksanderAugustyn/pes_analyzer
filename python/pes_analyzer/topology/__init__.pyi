@@ -9,6 +9,7 @@ import numpy.typing as npt
 
 def find_watershed_segmentation(
     energies: npt.NDArray[np.float64],
+    neighborhood: str = ...,
 ) -> tuple[
     npt.NDArray[np.int32],
     list[tuple[tuple[int, ...], float]],
