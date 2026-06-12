@@ -315,6 +315,39 @@ def test_pocket_beyond_elongation_window_rejected(mm):
     assert "beyond elongation window" in log
 
 
+def _deep_slope_pocket_grid():
+    """279Mt case: a confirmed minimum deeper than the GS, inside the
+    elongation window, but with small basin persistence.
+
+    Corridor column 1. The pocket (4,2)=-1.0 (c=1.2, in-window, below the
+    GS energy 0.0) leaks through its rim (5,2)=-0.7 onto the descent at
+    (5,1)=-0.4: persistence -0.4 - (-1.0) = 0.6 < 1.0 MeV. The true GS
+    (0,1)=0.0 has persistence 6.0 (the fission barrier). Energy-only
+    selection picks the pocket; the persistence floor must reject it.
+    """
+    e = np.full((12, 3), 9.0)
+    e[:, 1] = [0.0, 6.0, 2.0, 4.0, 1.2, -0.4,
+               -1.1, -1.6, -2.0, -2.4, -2.7, -3.0]
+    e[4, 2] = -1.0
+    e[5, 2] = -0.7
+    return e
+
+
+def test_gs_requires_large_persistence(mm):
+    energies = _deep_slope_pocket_grid()
+    sel, tree, log = _run_selection(
+        mm, energies, [((4, 2), -1.0), ((0, 1), 0.0), ((2, 1), 2.0)])
+
+    # GS = deepest confirmed minimum in the window WITH basin persistence
+    # >= SM_PERSISTENCE; the deeper slope pocket (pers 0.6) is skipped
+    assert sel["ground_state"] == tree.basin_of_point((0, 1))
+    assert sel["gs_persistence_bf"] == pytest.approx(6.0)
+    assert "GS candidate" in log and "persistence 0.60" in log
+
+    # downstream selection is undisturbed
+    assert sel["secondary_minimum"] == tree.basin_of_point((2, 1))
+
+
 def _fragmented_well_grid():
     """232Th-like sub-noise fragmentation (spec 5.2 re-anchoring).
 

@@ -790,10 +790,22 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
     print(f"    Elongation windows: GS/SM c <= {c_sm_max:.3f} (first quarter), "
           f"TM c <= {c_tm_max:.3f} (first third) of c in [{c_lo:g}, {c_hi:g}]",
           file=out)
-    gs_candidates = [
-        (idx, e) for idx, e in minima_gs_sm
-        if float(axes['c'][idx[c_pos]]) <= c_sm_max
-    ]
+    # GS = deepest confirmed minimum in the window whose basin traps at
+    # least as well as anything we label (persistence >= SM_PERSISTENCE).
+    # Without the floor, a deep low-persistence pocket on the scission
+    # slope admitted by the elongation window steals the GS (279Mt:
+    # E=-10.23 at c=1.525, persistence 0.48, vs the true GS at c=1.050).
+    gs_candidates = []
+    for idx, e in minima_gs_sm:
+        if float(axes['c'][idx[c_pos]]) > c_sm_max:
+            continue
+        pers = tree.node(tree.basin_of_point(tuple(idx))).persistence
+        if pers < SM_PERSISTENCE:
+            print(f"      GS candidate {_format_coords(idx, axes)} E={e:.4f} "
+                  f"skipped: basin persistence {pers:.2f} MeV "
+                  f"< {SM_PERSISTENCE} MeV", file=out)
+            continue
+        gs_candidates.append((idx, e))
     if not gs_candidates:
         return sel, None, None, None
     gs_idx, _gs_e = min(gs_candidates, key=lambda t: t[1])
