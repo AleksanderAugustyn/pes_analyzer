@@ -116,7 +116,11 @@ PARAMETER_LIMITS = {
 # =============================================================================
 GROUND_STATE_C_THRESHOLD = 1.4   # GS must lie within the normal-shape region (c < this)
 GS_SM_CONFIRM_RANGE = 2   # range-2 confirmation for ground state / secondary minimum
-MEP_PERSISTENCE = 0.4         # persistence floor (MeV) for minima/saddles on the MEP profile
+MEP_PERSISTENCE = 0.4         # noise floor (MeV) for pruning the raw MEP profile
+SM_PERSISTENCE = 1.0          # min profile well depth (MeV) for the secondary minimum
+THIRD_MIN_PERSISTENCE = 0.5   # min profile well depth (MeV) for the third minimum
+MIN_SEPARATION_FRAC = 0.05    # min spacing between labeled minima, fraction of MEP length
+CONFIRMED_MIN_RADIUS = 2      # max Chebyshev cells from a labeled minimum to an r=2-confirmed one
 MERGE_TREE_PRUNE = 0.4        # persistence (MeV) threshold for the pruned merge-tree panel
 MERGE_TREE_MARKER_MIN = 0.1   # min persistence (MeV) for a non-critical basin to get a marker+label
 
@@ -721,36 +725,80 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
         return tuple(int(v) for v in path_idx[k]), float(path_e[k])
 
     last = len(path_e) - 1
-    # Barrier-region wells: interior profile minima at energies above the GS
-    # and within the first half of the path. The SM and TM sit close to the
-    # GS in path order; pockets far below the GS or deep into the descent are
-    # ripples on the scission slope, not fission wells (the old drainage rule
-    # rejected them for the same reason). They stay on the plot but get no
-    # SM/TM label.
     gs_e = float(path_e[0])
-    interior_all = [(k, e) for k, e in profile.minima if k not in (0, last)]
-    interior = [(k, e) for k, e in interior_all if e > gs_e and k <= last // 2]
-    for n, (k, e) in enumerate(interior_all):
+    min_sep = max(1, int(round(MIN_SEPARATION_FRAC * last)))
+    conf_idx = np.array([idx for idx, _e in minima_gs_sm], dtype=np.int64)
+
+    # Escape depth of a surviving profile minimum: the climb to the nearest
+    # surviving saddle on the easier side -- the well's persistence along
+    # the path.
+    all_ext = sorted(
+        [(k, e, True) for k, e in profile.minima]
+        + [(k, e, False) for k, e in profile.saddles]
+    )
+
+    def well_depth(k0):
+        i = next(j for j, (k, _e, _m) in enumerate(all_ext) if k == k0)
+        left = [e for _k, e, m in all_ext[:i] if not m]
+        right = [e for _k, e, m in all_ext[i + 1:] if not m]
+        barrier = min(left[-1] if left else np.inf,
+                      right[0] if right else np.inf)
+        return barrier - all_ext[i][1]
+
+    def reject_reason(k, e, prev_k, depth_floor):
+        """Physical conditions for a labeled fission well; None if it passes.
+
+        A real well sits in the barrier region (above the GS energy, first
+        half of the path), is distinct from the previous labeled minimum
+        (MIN_SEPARATION_FRAC of the path), is deep enough to be noteworthy
+        (depth_floor), and sits at or near an r=2-confirmed local minimum.
+        """
         if e <= gs_e:
-            tag = "  [scission-slope pocket, ignored]"
-        elif k > last // 2:
-            tag = "  [beyond half-path, ignored]"
+            return "below GS energy (scission slope)"
+        if k > last // 2:
+            return "beyond half-path"
+        if k - prev_k < min_sep:
+            return f"only {k - prev_k} steps from previous labeled minimum (<{min_sep})"
+        if well_depth(k) < depth_floor:
+            return f"well depth {well_depth(k):.2f} MeV < {depth_floor} MeV"
+        cell = np.array(grid_pt(k)[0], dtype=np.int64)
+        cheb = int(np.abs(conf_idx - cell).max(axis=1).min())
+        if cheb > CONFIRMED_MIN_RADIUS:
+            return (f"nearest r{GS_SM_CONFIRM_RANGE}-confirmed minimum is "
+                    f"{cheb} cells away (>{CONFIRMED_MIN_RADIUS})")
+        return None
+
+    # Walk interior minima in path order: the first well passing the SM
+    # conditions is the secondary minimum; the first one after it passing
+    # the TM conditions is the third minimum. No SM means no TM search.
+    interior_all = [(k, e) for k, e in profile.minima if k not in (0, last)]
+    sm = tm = None
+    for k, e in interior_all:
+        if sm is None:
+            reason = reject_reason(k, e, 0, SM_PERSISTENCE)
+            label = "SM" if reason is None else None
+        elif tm is None:
+            reason = reject_reason(k, e, sm[0], THIRD_MIN_PERSISTENCE)
+            label = "TM" if reason is None else None
         else:
-            tag = ""
-        print(f"      interior minimum {n + 1}: step {k} "
+            reason, label = "SM and TM already assigned", None
+        tag = f"  -> {label}" if label else f"  [{reason}]"
+        print(f"      interior minimum: step {k} "
               f"{_format_coords(grid_pt(k)[0], axes)} E={e:.4f}{tag}", file=out)
-    if len(interior) >= 1:
-        sel["secondary_minimum"] = tree.basin_of_point(grid_pt(interior[0][0])[0])
-    if len(interior) >= 2:
-        sel["third_minimum"] = tree.basin_of_point(grid_pt(interior[1][0])[0])
-    if len(interior) > 2:
-        print(f"      note: {len(interior) - 2} barrier-region well(s) beyond "
-              f"SM/TM left unlabeled", file=out)
+        if label == "SM":
+            sm = (k, e)
+        elif label == "TM":
+            tm = (k, e)
+
+    if sm is not None:
+        sel["secondary_minimum"] = tree.basin_of_point(grid_pt(sm[0])[0])
+    if tm is not None:
+        sel["third_minimum"] = tree.basin_of_point(grid_pt(tm[0])[0])
 
     # One barrier per pair of consecutive labeled minima (GS, SM, TM, FE):
     # the highest profile saddle inside that segment. Dropping an unlabeled
     # pocket merges its two segments, so the max is the controlling barrier.
-    anchors = [0] + [k for k, _e in interior[:2]] + [last]
+    anchors = [0] + [k for k, _e in (m for m in (sm, tm) if m is not None)] + [last]
     saddle_keys = ["inner_saddle", "outer_saddle", "third_saddle"]
     for key, (a, b) in zip(saddle_keys, zip(anchors, anchors[1:])):
         segment = [(k, e) for k, e in profile.saddles if a < k < b]
