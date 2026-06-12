@@ -6,6 +6,8 @@
 use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 
+use crate::common::nd::Stencil;
+
 pub fn check_ndim(ndim: usize) -> PyResult<()> {
     if (2..=7).contains(&ndim) {
         Ok(())
@@ -83,6 +85,17 @@ pub fn check_confirm_range(
         )));
     }
     Ok(())
+}
+
+/// Parse the `neighborhood` keyword shared by the flood-based kernels.
+pub fn parse_neighborhood(name: &str) -> PyResult<Stencil> {
+    match name {
+        "von_neumann" => Ok(Stencil::VonNeumann),
+        "moore" => Ok(Stencil::Moore),
+        _ => Err(PyValueError::new_err(format!(
+            "neighborhood must be 'von_neumann' or 'moore', got '{name}'"
+        ))),
+    }
 }
 
 /// Convert a signed Python integer index tuple to `usize`, returning
@@ -181,6 +194,20 @@ mod tests {
         assert!(check_confirm_range(Some(0), 1).is_err());
         assert!(check_confirm_range(Some(6), 1).is_err());
         assert!(check_confirm_range(Some(100), 1).is_err());
+    }
+
+    #[test]
+    fn parse_neighborhood_accepts_both_names() {
+        use crate::common::nd::Stencil;
+        assert_eq!(parse_neighborhood("von_neumann").unwrap(), Stencil::VonNeumann);
+        assert_eq!(parse_neighborhood("moore").unwrap(), Stencil::Moore);
+    }
+
+    #[test]
+    fn parse_neighborhood_rejects_unknown() {
+        assert!(parse_neighborhood("chebyshev").is_err());
+        assert!(parse_neighborhood("").is_err());
+        assert!(parse_neighborhood("Moore").is_err()); // case-sensitive
     }
 
     #[test]
