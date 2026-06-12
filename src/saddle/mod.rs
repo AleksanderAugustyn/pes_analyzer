@@ -9,16 +9,17 @@ use pyo3::types::{PyModule, PyTuple};
 
 use crate::common::validate::{
     check_index_in_bounds, check_index_length, check_ndim, check_total_cells_fit_u32,
-    coerce_signed_indices,
+    coerce_signed_indices, parse_neighborhood,
 };
 
 #[pyfunction]
-#[pyo3(name = "find_iwf_grid")]
+#[pyo3(name = "find_iwf_grid", signature = (energies, start, end, neighborhood = "von_neumann"))]
 fn py_find_iwf_grid<'py>(
     py: Python<'py>,
     energies: PyReadonlyArrayDyn<'py, f64>,
     start: Vec<i64>,
     end: Vec<i64>,
+    neighborhood: &str,
 ) -> PyResult<Option<(Py<PyTuple>, f64)>> {
     if !energies.is_c_contiguous() {
         return Err(PyValueError::new_err(
@@ -32,6 +33,7 @@ fn py_find_iwf_grid<'py>(
     check_index_length(arr.shape(), start.len())?;
     check_index_length(arr.shape(), end.len())?;
     check_total_cells_fit_u32(arr.len())?;
+    let stencil = parse_neighborhood(neighborhood)?;
 
     let start_idx = coerce_signed_indices(&start)?;
     let end_idx = coerce_signed_indices(&end)?;
@@ -52,7 +54,8 @@ fn py_find_iwf_grid<'py>(
     // Compute under released GIL. `arr` is a view over the NumPy buffer;
     // `PyReadonlyArrayDyn` keeps the underlying array alive and read-locked
     // for the duration of this function, so the pointer remains valid.
-    let result = py.allow_threads(|| iwf_grid::iwf_grid_inner(arr, &start_idx, &end_idx));
+    let result =
+        py.allow_threads(|| iwf_grid::iwf_grid_inner(arr, &start_idx, &end_idx, stencil));
 
     // Spec §3.2 requires the returned index to be a `tuple[int, ...]`, not
     // a list. PyO3's default `Vec<usize>` conversion produces a Python list,

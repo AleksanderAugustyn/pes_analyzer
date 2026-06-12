@@ -3,7 +3,7 @@
 use ndarray::ArrayViewD;
 
 use crate::common::dsu::DisjointSetUnion;
-use crate::common::nd::{axis_neighbors, compute_strides, index_to_linear, linear_to_index};
+use crate::common::nd::{compute_strides, index_to_linear, linear_to_index, Stencil};
 
 /// Search for the saddle point between `start_idx` and `end_idx` on
 /// `energies` using the watershed algorithm.
@@ -21,6 +21,7 @@ pub fn iwf_grid_inner(
     energies: ArrayViewD<'_, f64>,
     start_idx: &[usize],
     end_idx: &[usize],
+    stencil: Stencil,
 ) -> Option<(Vec<usize>, f64)> {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
@@ -62,15 +63,14 @@ pub fn iwf_grid_inner(
     let mut dsu = DisjointSetUnion::new(n_valid);
     let mut processed: Vec<bool> = vec![false; n_valid];
 
-    // 2 * ndim is the maximum neighbor count.
-    let mut nbrs: Vec<usize> = Vec::with_capacity(2 * shape.len());
+    let mut nbrs: Vec<usize> = Vec::new();
 
     for &(lin_u32, energy) in &sorted {
         let lin = lin_u32 as usize;
         let cur_compact = remap[lin];
         processed[cur_compact as usize] = true;
 
-        axis_neighbors(lin, &shape, &strides, &mut nbrs);
+        stencil.neighbors(lin, &shape, &strides, &mut nbrs);
         for &nbr_lin in &nbrs {
             let nbr_compact = remap[nbr_lin];
             if nbr_compact == u32::MAX {
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn start_equals_end_returns_start_immediately() {
         let arr = to_dyn([3, 3], vec![0.0; 9]);
-        let result = iwf_grid_inner(arr.view(), &[1, 1], &[1, 1]).unwrap();
+        let result = iwf_grid_inner(arr.view(), &[1, 1], &[1, 1], Stencil::VonNeumann).unwrap();
         assert_eq!(result.0, vec![1, 1]);
         assert_eq!(result.1, 0.0);
     }
@@ -131,7 +131,8 @@ mod tests {
         e[4 * 5 + 3] = 1.0;
         e[3 * 5 + 3] = 2.0;
         let arr = to_dyn([5, 5], e);
-        let (idx, energy) = iwf_grid_inner(arr.view(), &[0, 0], &[4, 4]).unwrap();
+        let (idx, energy) =
+            iwf_grid_inner(arr.view(), &[0, 0], &[4, 4], Stencil::VonNeumann).unwrap();
         assert_eq!(energy, 4.0);
         assert_eq!(idx, vec![2, 2]);
     }
@@ -144,7 +145,7 @@ mod tests {
             0.0, 1.0, nan, 1.0, 0.0, 1.0, 2.0, nan, 2.0, 1.0, 0.0, 1.0, nan, 1.0, 0.0,
         ];
         let arr = to_dyn([3, 5], e);
-        let result = iwf_grid_inner(arr.view(), &[1, 0], &[1, 4]);
+        let result = iwf_grid_inner(arr.view(), &[1, 0], &[1, 4], Stencil::VonNeumann);
         assert!(result.is_none());
     }
 
@@ -153,9 +154,25 @@ mod tests {
         let e = vec![0.0, 5.0, 0.0, 10.0, 10.0, 10.0];
         let arr = to_dyn([2, 3], e);
         // start=(0,0), end=(0,2). Bridge is (0,1)=5.0 on the cheap row.
-        let (idx, energy) = iwf_grid_inner(arr.view(), &[0, 0], &[0, 2]).unwrap();
+        let (idx, energy) =
+            iwf_grid_inner(arr.view(), &[0, 0], &[0, 2], Stencil::VonNeumann).unwrap();
         assert_eq!(energy, 5.0);
         assert_eq!(idx, vec![0, 1]);
+    }
+
+    #[test]
+    fn moore_stencil_crosses_diagonal_channel() {
+        // Diagonal channel 0 → 1 → 0; von Neumann must climb a 9,
+        // Moore slips through the diagonal at 1.
+        let e = vec![0.0, 9.0, 9.0, 9.0, 1.0, 9.0, 9.0, 9.0, 0.0];
+        let arr = to_dyn([3, 3], e);
+        let (_i, e_vn) =
+            iwf_grid_inner(arr.view(), &[0, 0], &[2, 2], Stencil::VonNeumann).unwrap();
+        assert_eq!(e_vn, 9.0);
+        let (idx, e_m) =
+            iwf_grid_inner(arr.view(), &[0, 0], &[2, 2], Stencil::Moore).unwrap();
+        assert_eq!(e_m, 1.0);
+        assert_eq!(idx, vec![1, 1]);
     }
 
     #[test]
@@ -174,7 +191,8 @@ mod tests {
             let start = vec![0usize; ndim];
             let mut end = vec![0usize; ndim];
             end[0] = 2;
-            let (_idx, energy) = iwf_grid_inner(arr.view(), &start, &end).unwrap();
+            let (_idx, energy) =
+                iwf_grid_inner(arr.view(), &start, &end, Stencil::VonNeumann).unwrap();
             assert_eq!(energy, 7.0, "ndim={ndim}");
         }
     }

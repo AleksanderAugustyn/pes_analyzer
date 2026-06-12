@@ -15,6 +15,7 @@ def find_iwf_grid(
     energies: npt.NDArray[np.float64],
     start: tuple[int, ...],
     end: tuple[int, ...],
+    neighborhood: str = ...,
 ) -> tuple[tuple[int, ...], float] | None:
     """Find the saddle point between ``start`` and ``end`` on a pre-computed
     energy grid using the imaginary water flow (watershed) algorithm.
