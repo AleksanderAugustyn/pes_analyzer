@@ -78,6 +78,7 @@ def find_iwf_grid(
     energies: numpy.ndarray[float64],
     start: tuple[int, ...],
     end: tuple[int, ...],
+    neighborhood: str = "von_neumann",
 ) -> tuple[tuple[int, ...], float] | None:
     ...
 ```
@@ -87,6 +88,7 @@ def find_iwf_grid(
 - **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are treated as walls.
 - **`start`** — N-tuple of `int` grid indices. Must reference a non-`NaN` cell.
 - **`end`** — N-tuple of `int` grid indices. Must reference a non-`NaN` cell.
+- **`neighborhood`** — `"von_neumann"` (2N axis neighbors, default) or `"moore"` (3ᴺ−1 Chebyshev r=1 neighbors). See `ALGORITHMS.md` § Neighborhood stencils.
 
 ### Returns
 
@@ -95,7 +97,7 @@ def find_iwf_grid(
 
 ### Raises
 
-- `ValueError` if `energies` is not C-contiguous, if `start`/`end` have the wrong length, if any index is out of bounds, or if either endpoint cell is `NaN`.
+- `ValueError` if `energies` is not C-contiguous, if `start`/`end` have the wrong length, if any index is out of bounds, if either endpoint cell is `NaN`, or if `neighborhood` is not `"von_neumann"`/`"moore"`.
 
 ### What it does
 
@@ -321,6 +323,7 @@ from pes_analyzer.topology import find_watershed_segmentation
 
 def find_watershed_segmentation(
     energies: numpy.ndarray[float64],
+    neighborhood: str = "von_neumann",
 ) -> tuple[
     numpy.ndarray[int32],                              # labels
     list[tuple[tuple[int, ...], float]],               # basins
@@ -332,6 +335,7 @@ def find_watershed_segmentation(
 ### Parameters
 
 - **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are masked.
+- **`neighborhood`** — `"von_neumann"` (2N axis neighbors, default) or `"moore"` (3ᴺ−1 Chebyshev r=1 neighbors). See `ALGORITHMS.md` § Neighborhood stencils.
 
 ### Returns
 
@@ -343,7 +347,7 @@ A 3-tuple `(labels, basins, merges)`:
 
 ### Raises
 
-- `ValueError` if `energies` is not C-contiguous or if `energies.ndim` is outside `[2, 7]`.
+- `ValueError` if `energies` is not C-contiguous, if `energies.ndim` is outside `[2, 7]`, or if `neighborhood` is not `"von_neumann"`/`"moore"`.
 
 ### What it does
 
@@ -369,9 +373,74 @@ print(merges)
 
 ---
 
+## `find_minimum_energy_path`
+
+```python
+from pes_analyzer.topology import find_minimum_energy_path
+
+def find_minimum_energy_path(
+    energies: numpy.ndarray[float64],
+    start: tuple[int, ...],
+    end: tuple[int, ...],
+    neighborhood: str = "von_neumann",
+) -> tuple[numpy.ndarray[int64], numpy.ndarray[float64]] | None:
+    ...
+```
+
+### Parameters
+
+- **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are treated as walls.
+- **`start`** — N-tuple of `int` grid indices. Must reference a non-`NaN` cell.
+- **`end`** — N-tuple of `int` grid indices. Must reference a non-`NaN` cell.
+- **`neighborhood`** — `"von_neumann"` (2N axis neighbors, default) or `"moore"` (3ᴺ−1 Chebyshev r=1 neighbors). See `ALGORITHMS.md` § Neighborhood stencils.
+
+### Returns
+
+- `(path_indices, path_energies)`:
+  - **`path_indices`** — `(K, N)` `int64` array. Row 0 is `start`, row K−1 is `end`. With `"von_neumann"`, consecutive rows differ by ±1 in exactly one axis; with `"moore"`, consecutive rows are at Chebyshev distance 1.
+  - **`path_energies`** — `(K,)` `float64` array, the energy profile along the path.
+- `None` — if `start` and `end` lie in disjoint non-`NaN` regions (no path exists).
+- `start == end` returns a length-1 path.
+
+### Raises
+
+- `ValueError` if `energies` is not C-contiguous, if `start`/`end` have the wrong length, if any index is out of bounds, if either endpoint cell is `NaN`, or if `neighborhood` is not `"von_neumann"`/`"moore"`.
+
+### What it does
+
+Computes the *deep minimax path*: among all grid paths from `start` to `end` it minimizes the highest energy crossed (so it passes through the exact saddles `find_iwf_grid` reports), and between saddles it descends to the actual basin minimum cells. The profile's local maxima are therefore true inter-basin saddles and its local minima are true basin minima — feed `path_energies` to `analyze_path_profile` to extract them. See `ALGORITHMS.md` (`find_minimum_energy_path`) for the algorithm.
+
+### Example
+
+```python
+import numpy as np
+from pes_analyzer.topology import find_minimum_energy_path, analyze_path_profile
+
+energies = np.array([[0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0]])
+idx, prof = find_minimum_energy_path(energies, (0, 0), (0, 8))
+print(idx[:, 1])
+# [0 1 2 3 4 5 6 7 8]
+print(analyze_path_profile(prof))
+# PathProfile(minima=[(0, 0.0), (4, 1.0), (8, 2.0)], saddles=[(2, 5.0), (6, 6.0)])
+```
+
+### Notes and edge cases
+
+- The path can be long: it dips to every basin minimum between barriers (a single descent chain on a 5-D map can be hundreds of steps). K is still tiny next to the grid size.
+- The path is a walk, not necessarily a simple path: connecting two cells of one basin descends both to the basin minimum, which may re-walk a shared chain suffix.
+- For the same `neighborhood`, `max(path_energies)` equals the `find_iwf_grid` saddle energy between the same endpoints exactly (both kernels flood in the same order).
+
+---
+
 ## Topology helpers
 
-The pure-Python helpers in `pes_analyzer.topology` analyse the merge tree produced by `find_watershed_segmentation`.
+The pure-Python helpers in `pes_analyzer.topology` analyse the merge tree produced by `find_watershed_segmentation` and the profile produced by `find_minimum_energy_path`.
+
+### `analyze_path_profile(path_energies, min_persistence=0.0) -> PathProfile`
+
+Extracts the alternating local minima and maxima (saddles) of a 1-D energy profile, then repeatedly cancels the adjacent minimum/saddle pair with the smallest energy gap until every surviving pair clears `min_persistence`. The profile's global minimum is never cancelled. Path endpoints participate like any extremum (a rising start / falling end counts as a minimum); plateau extrema report the last plateau cell. Raises `ValueError` on empty, non-1-D, or NaN-containing input.
+
+`PathProfile` is a frozen dataclass with `minima: list[tuple[int, float]]` and `saddles: list[tuple[int, float]]` — `(path_index, energy)` pairs in path order. Map a `path_index` back to grid coordinates via row `k` of the `path_indices` array from `find_minimum_energy_path`.
 
 ### `compute_persistence(basins, merges) -> numpy.ndarray[float64]`
 

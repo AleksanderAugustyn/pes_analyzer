@@ -77,3 +77,31 @@ Same imaginary-water-flow flood as `find_iwf_grid`, run to completion instead of
 **Complexity.** `O(M log M)` where `M` = non-`NaN` cell count, identical to `find_iwf_grid`. The sort dominates; the union-find with path compression and union-by-rank is effectively `O(M α(M))`. Memory `O(M)` for the sorted vector, remap, DSU, basin-of-root, and labels.
 
 **Relation to `find_iwf_grid`.** `find_iwf_grid` is the two-point specialization: same flood, but it terminates the moment the start and end cells share a DSU root and returns that single saddle cell. `find_watershed_segmentation` keeps the flood going to completion and records every merge along the way. Callers that only need the saddle between two specified cells should keep using `find_iwf_grid` — it has the early-exit and avoids building the merge tree.
+
+## `find_minimum_energy_path`
+
+**Deep minimax path.** Among all grid paths between two cells, the path that minimizes the highest energy crossed — so it passes through the exact IWF saddles — and that, between saddles, descends to the actual basin minimum cells. Its 1-D profile has true inter-basin saddles as local maxima and true basin minima as local minima; `analyze_path_profile` reads critical points directly off it.
+
+**Implementation** (see `src/topology/mep.rs`):
+
+1. Run the ascending-energy flood (same sort, remap, and DSU as `find_iwf_grid`), recording two extra structures:
+   - **Flood parent** per cell: the first already-flooded neighbour the cell unions into. Because cells are processed in ascending order, parent chains descend monotonically (non-increasing energy) and terminate at the basin seed — the basin's minimum cell. This gives a guaranteed descent path with none of the stuck-cell ambiguity of greedy steepest descent.
+   - **Kruskal forest** over components: leaves are basins; each merge event becomes an internal node storing the saddle cell, the already-flooded neighbour on the other component, and which child subtree holds the saddle-side component. Node ids increase with creation time, so a parent's id always exceeds its children's.
+2. Early-exit the flood once `start` and `end` share a DSU root (the connecting event is the IWF saddle between them).
+3. Reconstruct iteratively with a segment stack. `connect(a, b)`:
+   - Same basin (descent chains end at the same seed): emit `a`'s chain down to the seed, then `b`'s chain reversed. The V through the seed is the deliberate deep dip to the basin minimum; if the two chains share a suffix, those cells are walked down and back up (the path is a walk, not necessarily simple).
+   - Different basins: find the lowest common ancestor event in the forest (lift the smaller node id), orient the saddle crossing so `u` is on `a`'s side and `v` on `b`'s, and recurse on `(a, u)` and `(v, b)`. `u` and `v` are stencil neighbours, so the crossing is a valid move.
+
+**Guarantees.** For the same `neighborhood`, the path's maximum energy equals the `find_iwf_grid` saddle energy bit-for-bit (identical sort order and union schedule). Every profile local minimum is a watershed basin seed.
+
+**Complexity.** `O(M log M)` flood (sort-dominated) plus `O(K)` reconstruction for a path of K cells. Memory `O(M)`: parents, forest, node-of-root, remap, DSU.
+
+**`NaN` handling.** As everywhere: NaN cells are excluded from the sort and act as walls. Disconnected endpoints return `None`; NaN at an endpoint is a `ValueError` raised by the wrapper.
+
+## Neighborhood stencils
+
+`find_iwf_grid`, `find_watershed_segmentation`, and `find_minimum_energy_path` accept `neighborhood="von_neumann"` (default; 2N axis neighbours) or `"moore"` (3ᴺ−1 Chebyshev neighbours at range 1; the range is fixed).
+
+Von Neumann is the more physical choice for fission-barrier analysis: it cannot squeeze through two orthogonal barriers that meet at a corner via the unsampled diagonal. Moore matches the move set of Metropolis-style random walks on PES grids. The two bracket the continuum limit — von Neumann biases barriers slightly high (forbids diagonal moves the continuous surface allows), Moore slightly low (corner-cuts through cells it never samples) — so comparing both is a cheap grid-resolution diagnostic. Mixing stencils between the merge tree and the MEP makes their saddles disagree; pass the same value to both.
+
+The extrema kernels (`find_minima_grid` etc.) are unaffected: they keep the king-move Chebyshev stencil with the separate `neighborhood_range` parameter, for the reasons given above.
