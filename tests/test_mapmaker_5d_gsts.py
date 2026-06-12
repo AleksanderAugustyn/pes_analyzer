@@ -37,33 +37,40 @@ def mm():
 
 
 class TestMepRejectReason:
-    """Spec section 5.3: checks (a)-(c) are path physics, (d) is basin persistence."""
+    """Checks (a)-(b) are energy ordering, (c) is the elongation window,
+    (d) is basin persistence. Signature:
+    _mep_reject_reason(e, prev_e, gs_e, c, c_limit, depth_floor, persistence)."""
 
-    LAST = 100  # half-path boundary at k=50
+    C_LIM = 1.575  # first quarter of a c-range [1.0, 3.3]
 
     def test_passes_all_checks(self, mm):
-        assert mm._mep_reject_reason(10, 2.0, 0.0, 0.0, self.LAST, 1.0, 2.5) is None
+        assert mm._mep_reject_reason(2.0, 0.0, 0.0, 1.4, self.C_LIM, 1.0, 2.5) is None
 
     def test_below_gs_energy(self, mm):
-        reason = mm._mep_reject_reason(10, -1.0, 0.0, 0.0, self.LAST, 1.0, 9.0)
+        reason = mm._mep_reject_reason(-1.0, 0.0, 0.0, 1.4, self.C_LIM, 1.0, 9.0)
         assert "below GS energy" in reason
 
     def test_below_previous_minimum(self, mm):
-        reason = mm._mep_reject_reason(10, 1.5, 2.0, 0.0, self.LAST, 1.0, 9.0)
+        reason = mm._mep_reject_reason(1.5, 2.0, 0.0, 1.4, self.C_LIM, 1.0, 9.0)
         assert "below previous" in reason
 
-    def test_beyond_half_path(self, mm):
-        reason = mm._mep_reject_reason(51, 2.0, 0.0, 0.0, self.LAST, 1.0, 9.0)
-        assert "beyond half-path" in reason
+    def test_beyond_elongation_window(self, mm):
+        reason = mm._mep_reject_reason(2.0, 0.0, 0.0, 1.7, self.C_LIM, 1.0, 9.0)
+        assert "beyond elongation window" in reason
+
+    def test_elongation_boundary_passes(self, mm):
+        # within-the-window semantics: equality with the limit passes
+        assert mm._mep_reject_reason(2.0, 0.0, 0.0, self.C_LIM, self.C_LIM,
+                                     1.0, 9.0) is None
 
     def test_persistence_below_floor(self, mm):
-        reason = mm._mep_reject_reason(10, 2.0, 0.0, 0.0, self.LAST, 1.0, 0.4)
+        reason = mm._mep_reject_reason(2.0, 0.0, 0.0, 1.4, self.C_LIM, 1.0, 0.4)
         assert "basin persistence" in reason
         assert "0.40" in reason
 
     def test_persistence_tie_passes(self, mm):
         # spec section 7: reject on <, exact equality with the floor passes
-        assert mm._mep_reject_reason(10, 2.0, 0.0, 0.0, self.LAST, 1.0, 1.0) is None
+        assert mm._mep_reject_reason(2.0, 0.0, 0.0, 1.4, self.C_LIM, 1.0, 1.0) is None
 
 
 def _line_tree():
@@ -163,11 +170,19 @@ def test_collect_candidates_reanchors_subnoise_satellite(mm):
     assert interior0[0][1] == pytest.approx(1.05)
 
 
+# c-axis for the 12-row test grids, range [1.0, 3.3] like the real maps.
+# Rows 0-5 (the barrier complex: GS, SM/TM candidates) sit inside the
+# first quarter (c <= 1.575); row 6 (c=1.9) is past the first third
+# (c <= 1.766..); the descent rows mimic the long scission slope.
+_C_VALS = np.array([1.0, 1.05, 1.1, 1.15, 1.2, 1.25,
+                    1.9, 2.2, 2.5, 2.8, 3.05, 3.3])
+
+
 def _axes_for(shape):
-    """Synthetic physical axes: c along axis 0 (0.8 + 0.1*i, so row 0 is
-    inside the GS region c < 1.4), a4 along axis 1."""
+    """Synthetic physical axes: c along axis 0, a4 along axis 1."""
+    assert shape[0] == len(_C_VALS)
     return {
-        "c": np.linspace(0.8, 0.8 + 0.1 * (shape[0] - 1), shape[0]),
+        "c": _C_VALS.copy(),
         "a4": np.linspace(0.0, 0.05 * (shape[1] - 1), shape[1]),
     }
 
@@ -270,6 +285,34 @@ def test_sideways_leak_rejected_by_persistence_not_profile_depth(mm):
     assert sel["inner_saddle"][1] == pytest.approx(6.0)
     assert sel["outer_saddle"] is None
     assert sel["saddle_segments"]["inner_saddle"] == "gs-fe"
+
+
+def _beyond_window_grid():
+    """A trapping pocket past the TM elongation window (spec rule c).
+
+    Corridor column 1. Row 4 (c=1.2, in-window) holds a sub-floor pocket
+    (persistence 0.45 < TM floor 0.5); row 6 (c=1.9, beyond the first
+    third of the c-range) holds a well that passes every energy rule
+    (above the SM, persistence 0.7 >= 0.5) and must be rejected by the
+    elongation window alone.
+    """
+    e = np.full((12, 3), 9.0)
+    e[:, 1] = [0.0, 6.0, 2.0, 4.0, 3.0, 3.45,
+               2.5, 3.2, -0.5, -1.5, -2.5, -3.0]
+    return e
+
+
+def test_pocket_beyond_elongation_window_rejected(mm):
+    energies = _beyond_window_grid()
+    sel, tree, log = _run_selection(
+        mm, energies, [((0, 1), 0.0), ((2, 1), 2.0)])
+
+    # SM at row 2 (c=1.1, persistence 4.0-2.0=2.0) is unaffected
+    assert sel["secondary_minimum"] == tree.basin_of_point((2, 1))
+    # row 4: in-window but persistence 3.45-3.0=0.45 < 0.5 -> rejected
+    # row 6: passes energy rules, killed only by the elongation window
+    assert sel["third_minimum"] is None
+    assert "beyond elongation window" in log
 
 
 def _fragmented_well_grid():

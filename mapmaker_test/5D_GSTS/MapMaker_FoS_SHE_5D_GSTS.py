@@ -114,7 +114,14 @@ PARAMETER_LIMITS = {
 # =============================================================================
 # ANALYSIS THRESHOLDS
 # =============================================================================
-GROUND_STATE_C_THRESHOLD = 1.4   # GS must lie within the normal-shape region (c < this)
+# Elongation gate. Every parameterization has an elongation parameter (Q20,
+# B20, FoS c). On a GS-to-scission map the barrier complex lives at the start
+# of its range: GS and SM in the first quarter, the (hyperdeformed) third
+# minimum may extend into the first third (232Th TM sits at fraction 0.26).
+# Window limits are inclusive; replaces the old absolute c < 1.4 threshold
+# and the half-path step rule.
+GS_SM_C_FRAC = 0.25           # GS + SM within the first quarter of the c-range
+TM_C_FRAC = 1.0 / 3.0         # TM within the first third of the c-range
 GS_SM_CONFIRM_RANGE = 2       # range-2 confirmation for ground-state candidate selection
 MEP_PERSISTENCE = 0.4         # noise floor (MeV) for pruning the raw MEP profile
 SM_PERSISTENCE = 1.0          # min N-D BASIN persistence (MeV) for the secondary minimum
@@ -681,25 +688,28 @@ def _print_minima_list(label: str,
         print(f"      {_format_coords(idx, axes)}  E={energy:>9.4f}{flag_str}", file=out)
 
 
-def _mep_reject_reason(k: int, e: float, prev_e: float, gs_e: float,
-                       last: int, depth_floor: float,
+def _mep_reject_reason(e: float, prev_e: float, gs_e: float,
+                       c: float, c_limit: float,
+                       depth_floor: float,
                        persistence: float) -> Optional[str]:
     """Why an interior MEP profile minimum cannot be labeled; None if it can.
 
-    Checks (a)-(c) are path/ordering physics from the profile: a labeled
-    fission well sits in the barrier region (first half of the path) and
-    above the previous labeled minimum (GS < SM < TM in energy; 232Th is
-    the template). Check (d) is the N-D basin persistence -- the climb to
-    the lowest escape saddle in ANY direction, not just along the path
-    (basin-led classification spec, section 5.3). Exact equality with the
-    floor passes: reject on <, never <=, so threshold ties stay accepted.
+    Checks (a)-(b) are energy ordering from the profile: a labeled fission
+    well sits above the previous labeled minimum (GS < SM < TM; 232Th is
+    the template). Check (c) is the elongation window: the barrier complex
+    lives in the first GS_SM_C_FRAC / TM_C_FRAC of the c-range on a
+    GS-to-scission map (replaces the old half-path step rule -- no path or
+    grid dependence). Check (d) is the N-D basin persistence -- the climb
+    to the lowest escape saddle in ANY direction, not just along the path
+    (basin-led classification spec, section 5.3). Boundaries are inclusive:
+    reject on < (floor) / > (window), so exact ties stay accepted.
     """
     if e <= gs_e:
         return "below GS energy (scission slope)"
     if e <= prev_e:
         return "below previous labeled minimum (valley on the descent)"
-    if k > last // 2:
-        return "beyond half-path"
+    if c > c_limit:
+        return f"c={c:.3f} beyond elongation window (c <= {c_limit:.3f})"
     if persistence < depth_floor:
         return f"basin persistence {persistence:.2f} MeV < {depth_floor} MeV"
     return None
@@ -751,8 +761,8 @@ def _collect_mep_candidates(profile, path_idx, tree, gs_basin, fe_basin,
 def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdout):
     """GS / SM / 3rd-min / FE / saddles: MEP ordering, merge-tree identity.
 
-    The ground state is the deepest confirmed minimum with
-    c < GROUND_STATE_C_THRESHOLD. The fission exit is the global-minimum
+    The ground state is the deepest confirmed minimum within the first
+    GS_SM_C_FRAC of the c-range. The fission exit is the global-minimum
     cell of the grid. The deep-minimax MEP between them orders the wells
     and assigns saddles to segments; the merge tree is authoritative for
     well identity (basin id, P1/P2 dedup) and significance (N-D basin
@@ -774,9 +784,15 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
         "gs_persistence_bf": None, "saddle_segments": {}, "well_depths": {},
     }
     c_pos = list(axes).index('c')
+    c_lo, c_hi = float(axes['c'][0]), float(axes['c'][-1])
+    c_sm_max = c_lo + GS_SM_C_FRAC * (c_hi - c_lo)
+    c_tm_max = c_lo + TM_C_FRAC * (c_hi - c_lo)
+    print(f"    Elongation windows: GS/SM c <= {c_sm_max:.3f} (first quarter), "
+          f"TM c <= {c_tm_max:.3f} (first third) of c in [{c_lo:g}, {c_hi:g}]",
+          file=out)
     gs_candidates = [
         (idx, e) for idx, e in minima_gs_sm
-        if float(axes['c'][idx[c_pos]]) < GROUND_STATE_C_THRESHOLD
+        if float(axes['c'][idx[c_pos]]) <= c_sm_max
     ]
     if not gs_candidates:
         return sel, None, None, None
@@ -835,17 +851,19 @@ def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdou
     # profile only sets the ordering.
     sm = tm = None                        # (k, e, basin_id)
     for k, e, bid, skip in interior:
-        pers = tree.node(bid).persistence
+        node = tree.node(bid)
+        pers = node.persistence
+        c_cand = float(axes['c'][node.minimum_index[c_pos]])
         if skip is not None:
             label = None
             verdict = f"-> ({skip})"
         elif sm is None:
-            reason = _mep_reject_reason(k, e, gs_e, gs_e, last,
+            reason = _mep_reject_reason(e, gs_e, gs_e, c_cand, c_sm_max,
                                         SM_PERSISTENCE, pers)
             label = "SM" if reason is None else None
             verdict = f"-> {label}" if label else f"[{reason}]"
         elif tm is None:
-            reason = _mep_reject_reason(k, e, sm[1], gs_e, last,
+            reason = _mep_reject_reason(e, sm[1], gs_e, c_cand, c_tm_max,
                                         THIRD_MIN_PERSISTENCE, pers)
             label = "TM" if reason is None else None
             verdict = f"-> {label}" if label else f"[{reason}]"
@@ -1005,7 +1023,6 @@ def run_critical_point_analysis_nd(
     print(f"  [time] Step 2 (watershed+tree): {time.perf_counter() - t0:.2f} s", file=out)
 
     print("\n  Step 3: Critical-point identification (MEP profile)", file=out)
-    print(f"    Ground-state c constraint: c < {GROUND_STATE_C_THRESHOLD}", file=out)
     t0 = time.perf_counter()
 
     sel, mep_idx, mep_e, mep_profile = select_mep_critical_points(
@@ -2036,7 +2053,8 @@ The program will:
     print(f"  Use float32 precision: {USE_FLOAT32}")
     print(f"  Critical point analysis: N-D (auto-detected axes)")
     print(f"  Output DPI: {DPI}")
-    print(f"  Ground state c threshold: {GROUND_STATE_C_THRESHOLD}")
+    print(f"  Elongation windows: GS/SM first {GS_SM_C_FRAC:.0%} of c-range, "
+          f"TM first {TM_C_FRAC:.0%}")
     print(f"  3D-only mask (a5=a6=a7=a8=0): {MASK_3D_ONLY}")
     print(f"  Scission overlay: {'any shape in column' if SCISSION_FULL else 'min-energy configuration'}")
     print("=" * 70)
