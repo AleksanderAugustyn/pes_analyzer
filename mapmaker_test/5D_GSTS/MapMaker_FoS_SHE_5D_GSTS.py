@@ -673,6 +673,30 @@ def _print_minima_list(label: str,
         print(f"      {_format_coords(idx, axes)}  E={energy:>9.4f}{flag_str}", file=out)
 
 
+def _mep_reject_reason(k: int, e: float, prev_e: float, gs_e: float,
+                       last: int, depth_floor: float,
+                       persistence: float) -> Optional[str]:
+    """Why an interior MEP profile minimum cannot be labeled; None if it can.
+
+    Checks (a)-(c) are path/ordering physics from the profile: a labeled
+    fission well sits in the barrier region (first half of the path) and
+    above the previous labeled minimum (GS < SM < TM in energy; 232Th is
+    the template). Check (d) is the N-D basin persistence -- the climb to
+    the lowest escape saddle in ANY direction, not just along the path
+    (basin-led classification spec, section 5.3). Exact equality with the
+    floor passes: reject on <, never <=, so threshold ties stay accepted.
+    """
+    if e <= gs_e:
+        return "below GS energy (scission slope)"
+    if e <= prev_e:
+        return "below previous labeled minimum (valley on the descent)"
+    if k > last // 2:
+        return "beyond half-path"
+    if persistence < depth_floor:
+        return f"basin persistence {persistence:.2f} MeV < {depth_floor} MeV"
+    return None
+
+
 def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdout):
     """GS / SM / 3rd-min / FE / saddles read off the MEP profile.
 
