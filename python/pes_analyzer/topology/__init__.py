@@ -21,9 +21,11 @@ from ._tree import (
 from .merge_tree import BasinNode, MergeTree
 
 find_watershed_segmentation = _native_topology.find_watershed_segmentation
+find_minimum_energy_path = _native_topology.find_minimum_energy_path
 
 __all__ = [
     "find_watershed_segmentation",
+    "find_minimum_energy_path",
     "compute_persistence",
     "prune_merge_tree",
     "MergeTree",

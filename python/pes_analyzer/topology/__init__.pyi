@@ -16,6 +16,13 @@ def find_watershed_segmentation(
     list[tuple[tuple[int, ...], float, int, int]],
 ]: ...
 
+def find_minimum_energy_path(
+    energies: npt.NDArray[np.float64],
+    start: tuple[int, ...],
+    end: tuple[int, ...],
+    neighborhood: str = ...,
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]] | None: ...
+
 def compute_persistence(
     basins: list[tuple[tuple[int, ...], float]],
     merges: list[tuple[tuple[int, ...], float, int, int]],
