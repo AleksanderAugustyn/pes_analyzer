@@ -697,6 +697,37 @@ def _mep_reject_reason(k: int, e: float, prev_e: float, gs_e: float,
     return None
 
 
+def _collect_mep_candidates(profile, path_idx, tree, gs_basin, fe_basin):
+    """Map interior profile minima to basins; flag GS/FE re-entries and revisits.
+
+    Returns one ``(k, e, basin_id, skip_reason)`` tuple per interior profile
+    minimum, in path order. ``skip_reason`` None marks a classification
+    candidate: the first on-path visit of a basin that is neither the GS
+    nor the fission-exit well. By P1 every profile-minimum cell is its
+    basin's seed, so basin_of_point is exact and no proximity confirmation
+    is needed; by P2 the path is a walk that may revisit basins, hence the
+    first-visit deduplication (basin-led classification spec, section 5.2).
+    """
+    last = len(path_idx) - 1
+    seen = {gs_basin, fe_basin}
+    out = []
+    for k, e in profile.minima:
+        if k in (0, last):
+            continue
+        bid = tree.basin_of_point(tuple(int(v) for v in path_idx[k]))
+        if bid == gs_basin:
+            skip = "GS basin, skipped"
+        elif bid == fe_basin:
+            skip = "fission-exit basin, skipped"
+        elif bid in seen:
+            skip = f"revisit of basin #{bid} at step {k}"
+        else:
+            skip = None
+            seen.add(bid)
+        out.append((k, float(e), bid, skip))
+    return out
+
+
 def select_mep_critical_points(energies, minima_gs_sm, axes, tree, out=sys.stdout):
     """GS / SM / 3rd-min / FE / saddles read off the MEP profile.
 

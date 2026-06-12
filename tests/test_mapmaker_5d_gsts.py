@@ -64,3 +64,58 @@ class TestMepRejectReason:
     def test_persistence_tie_passes(self, mm):
         # spec section 7: reject on <, exact equality with the floor passes
         assert mm._mep_reject_reason(10, 2.0, 0.0, 0.0, self.LAST, 1.0, 1.0) is None
+
+
+def _line_tree():
+    """Hand-built 1-D map, 6 cells, 3 basins. Root (id 0) is the FE basin.
+
+    cells:   0    1    2    3    4    5
+    labels:  1    1    2    2    0    0
+    basin 1: GS,  seed cell 0, E=0.0, dies at 5.0 -> persistence 5.0
+    basin 2: mid, seed cell 3, E=1.0, dies at 3.0 -> persistence 2.0
+    basin 0: FE,  seed cell 5, E=-2.0, root -> persistence inf
+    """
+    labels = np.array([1, 1, 2, 2, 0, 0], dtype=np.int32)
+    basins = [((5,), -2.0), ((0,), 0.0), ((3,), 1.0)]
+    merges = [((4,), 3.0, 0, 2), ((1,), 5.0, 0, 1)]
+    return MergeTree(labels, basins, merges)
+
+
+def test_collect_candidates_dedup_and_role_exclusion(mm):
+    """Spec section 5.2: first-visit kept; GS re-entry, FE wells, and basin
+    revisits (P2) are flagged with a skip reason, never classified."""
+    tree = _line_tree()
+    # A walk (P2): GS -> mid -> back into GS -> mid again -> FE
+    path_cells = [0, 1, 3, 1, 0, 1, 3, 4, 5]
+    path_idx = np.array([[c] for c in path_cells], dtype=np.int64)
+    profile = PathProfile(
+        minima=[(0, 0.0), (2, 1.0), (4, 0.0), (6, 1.0), (8, -2.0)],
+        saddles=[(1, 5.0), (3, 5.0), (5, 5.0), (7, 3.0)],
+    )
+    interior = mm._collect_mep_candidates(
+        profile, path_idx, tree, gs_basin=1, fe_basin=0)
+    assert [(k, bid, skip is None) for k, _e, bid, skip in interior] == [
+        (2, 2, True),    # first visit of the mid basin -> candidate
+        (4, 1, False),   # GS well re-entry -> skipped
+        (6, 2, False),   # revisit of basin 2 (P2 dedup) -> skipped
+    ]
+    assert "GS basin" in interior[1][3]
+    assert "revisit of basin #2" in interior[2][3]
+
+
+def test_collect_candidates_excludes_fission_exit_basin(mm):
+    """A profile minimum inside the FE basin must not become a TM candidate
+    (deep-descent topologies where the half-path rule would not fire)."""
+    tree = _line_tree()
+    path_cells = [0, 1, 3, 2, 4, 5]
+    path_idx = np.array([[c] for c in path_cells], dtype=np.int64)
+    profile = PathProfile(
+        minima=[(0, 0.0), (2, 1.0), (4, -1.0), (5, -2.0)],
+        saddles=[(1, 5.0), (3, 3.0)],
+    )
+    interior = mm._collect_mep_candidates(
+        profile, path_idx, tree, gs_basin=1, fe_basin=0)
+    by_k = {k: skip for k, _e, _bid, skip in interior}
+    assert by_k[2] is None                       # mid basin: candidate
+    assert "fission-exit basin" in by_k[4]       # cell 4 -> basin 0
+    assert 5 not in by_k                         # endpoint excluded entirely
