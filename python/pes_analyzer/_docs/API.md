@@ -513,10 +513,10 @@ print(tree.basin_of_point((0, 4)))        # 1
 
 The deleted `identify_critical_points` helper (a domain-specific labeller for
 ground state / secondary minimum / saddles / fission exit) is no longer part of
-the library. That physics now lives in the consumer:
-`mapmaker_test/MapMaker_FoS_SHE.py` composes these `MergeTree` primitives with
-its own predicates (e.g. the `c <= 1.25` ground-state constraint) — see it for a
-real-world worked example.
+the library. That physics now lives in the consumer: a downstream MapMaker-style
+script composes these `MergeTree` primitives with its own predicates (e.g. a
+ground-state elongation constraint) to label critical points. See `USAGE.md` for
+the end-to-end pipeline these primitives plug into.
 
 ---
 

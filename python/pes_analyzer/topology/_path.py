@@ -1,7 +1,7 @@
 """1-D critical-point extraction along a minimum-energy-path profile.
 
 Pure Python; the path itself comes from the Rust kernel
-``find_minimum_energy_path``. See ``API.md`` for the contract.
+``find_minimum_energy_path``. See ``_docs/API.md`` for the contract.
 """
 
 from __future__ import annotations

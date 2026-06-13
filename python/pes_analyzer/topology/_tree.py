@@ -1,8 +1,8 @@
 """Persistence-pruned merge-tree analysis for the watershed segmentation.
 
 These helpers are pure Python; the heavy lifting (the flood) is in the
-Rust kernel ``find_watershed_segmentation``. See ``API.md`` for the full
-contract.
+Rust kernel ``find_watershed_segmentation``. See ``_docs/API.md`` for the
+full contract.
 """
 
 from __future__ import annotations
