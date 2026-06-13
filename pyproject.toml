@@ -39,6 +39,7 @@ Repository = "https://github.com/AleksanderAugustyn/pes_analyzer"
 python-source = "python"
 module-name = "pes_analyzer._native"
 features = ["extension-module"]
+include = ["python/pes_analyzer/_docs/**/*.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
