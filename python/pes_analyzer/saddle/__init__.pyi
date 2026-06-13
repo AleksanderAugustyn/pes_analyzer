@@ -5,12 +5,9 @@ The submodule itself is registered at runtime by the Rust extension via
 can resolve ``from pes_analyzer.saddle import find_iwf_grid``.
 """
 
-from typing import overload
-
 import numpy as np
 import numpy.typing as npt
 
-@overload
 def find_iwf_grid(
     energies: npt.NDArray[np.float64],
     start: tuple[int, ...],
@@ -20,6 +17,6 @@ def find_iwf_grid(
     """Find the saddle point between ``start`` and ``end`` on a pre-computed
     energy grid using the imaginary water flow (watershed) algorithm.
 
-    See ``API.md`` (``find_iwf_grid``) for the full contract.
+    See ``_docs/API.md`` (``find_iwf_grid``) for the full contract.
     """
     ...

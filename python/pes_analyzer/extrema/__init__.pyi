@@ -31,7 +31,7 @@ def find_minima_grid(
     fast ``r = 1`` pass culls most cells before the expensive wide check.
     The result is identical to ``neighborhood_range=R``.
 
-    See ``API.md`` (``find_minima_grid``) for the full contract.
+    See ``_docs/API.md`` (``find_minima_grid``) for the full contract.
     """
     ...
 
