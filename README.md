@@ -20,14 +20,14 @@ Quantum-chemistry calculations produce potential energy surfaces (PES) as dense 
 
 ## Installation
 
-The package builds from source via [maturin](https://www.maturin.rs/). From a checkout:
-
 ```bash
-pip install maturin
-maturin develop --release
+pip install pes_analyzer
 ```
 
-For day-to-day development (editable installs, running tests, rebuilding after Rust changes) see [`DEVELOPMENT.md`](./DEVELOPMENT.md).
+Wheels bundle the full reference docs under `pes_analyzer/_docs/` — see
+[Documentation](#documentation). Building from source (PyO3 + Rust via
+[maturin](https://www.maturin.rs/)) and contributor workflows are covered in
+[`DEVELOPMENT.md`](./DEVELOPMENT.md).
 
 ## Quickstart
 
@@ -56,21 +56,28 @@ print(find_iwf_grid(energies, start=(0, 0), end=(0, 4)))
 
 | Function | Purpose | Reference |
 |---|---|---|
-| `grid.build_dense(coords, values)` | sparse rows → dense N-D array | [API.md](./API.md#build_dense) |
-| `saddle.find_iwf_grid(energies, start, end)` | watershed saddle search | [API.md](./API.md#find_iwf_grid) |
-| `extrema.find_minima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local minima (Chebyshev stencil) | [API.md](./API.md#find_minima_grid) |
-| `extrema.find_maxima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local maxima (dual of `find_minima_grid`) | [API.md](./API.md#find_maxima_grid) |
-| `extrema.find_extrema_grid(energies, *, neighborhood_range=1, confirm_range=None)` | combined single-sweep search | [API.md](./API.md#find_extrema_grid) |
-| `topology.find_watershed_segmentation(energies)` | full basin labelling + merge tree | [API.md](./API.md#find_watershed_segmentation) |
-| `topology.compute_persistence(basins, merges)` | per-basin topological persistence | [API.md](./API.md#topology-helpers) |
-| `topology.prune_merge_tree(basins, merges, threshold)` | drop low-persistence basins | [API.md](./API.md#topology-helpers) |
-| `topology.MergeTree(labels, basins, merges)` | traversable basin merge tree (physics-free primitives) | [API.md](./API.md#topology-helpers) |
+| `grid.build_dense(coords, values)` | sparse rows → dense N-D array | [API.md](./python/pes_analyzer/_docs/API.md#build_dense) |
+| `saddle.find_iwf_grid(energies, start, end)` | watershed saddle search | [API.md](./python/pes_analyzer/_docs/API.md#find_iwf_grid) |
+| `extrema.find_minima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local minima (Chebyshev stencil) | [API.md](./python/pes_analyzer/_docs/API.md#find_minima_grid) |
+| `extrema.find_maxima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local maxima (dual of `find_minima_grid`) | [API.md](./python/pes_analyzer/_docs/API.md#find_maxima_grid) |
+| `extrema.find_extrema_grid(energies, *, neighborhood_range=1, confirm_range=None)` | combined single-sweep search | [API.md](./python/pes_analyzer/_docs/API.md#find_extrema_grid) |
+| `topology.find_watershed_segmentation(energies)` | full basin labelling + merge tree | [API.md](./python/pes_analyzer/_docs/API.md#find_watershed_segmentation) |
+| `topology.compute_persistence(basins, merges)` | per-basin topological persistence | [API.md](./python/pes_analyzer/_docs/API.md#topology-helpers) |
+| `topology.prune_merge_tree(basins, merges, threshold)` | drop low-persistence basins | [API.md](./python/pes_analyzer/_docs/API.md#topology-helpers) |
+| `topology.MergeTree(labels, basins, merges)` | traversable basin merge tree (physics-free primitives) | [API.md](./python/pes_analyzer/_docs/API.md#topology-helpers) |
 
 ## Documentation
 
-- [`API.md`](./API.md) — full API reference with examples.
+The consumer reference docs are **bundled in the installed package** under
+`pes_analyzer/_docs/`; locate them at runtime with `pes_analyzer.docs_path()`.
+
+- [`USAGE.md`](./python/pes_analyzer/_docs/USAGE.md) — end-to-end pipeline cookbook (start here).
+- [`API.md`](./python/pes_analyzer/_docs/API.md) — full API reference with examples.
+- [`ALGORITHMS.md`](./python/pes_analyzer/_docs/ALGORITHMS.md) — how the watershed and minima algorithms work.
+
+Developer-facing docs stay in the repo (not bundled):
+
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — repo layout, Python/Rust seam, GIL handling.
-- [`ALGORITHMS.md`](./ALGORITHMS.md) — how the watershed and minima algorithms work.
 - [`DEVELOPMENT.md`](./DEVELOPMENT.md) — building, testing, common workflows.
 
 ## License
