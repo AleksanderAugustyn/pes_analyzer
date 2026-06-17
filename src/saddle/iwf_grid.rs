@@ -4,6 +4,7 @@ use ndarray::ArrayViewD;
 
 use crate::common::dsu::DisjointSetUnion;
 use crate::common::nd::{compute_strides, index_to_linear, linear_to_index, Stencil};
+use crate::common::scalar::Scalar;
 
 /// Search for the saddle point between `start_idx` and `end_idx` on
 /// `energies` using the watershed algorithm.
@@ -13,21 +14,21 @@ use crate::common::nd::{compute_strides, index_to_linear, linear_to_index, Stenc
 ///
 /// Preconditions (all enforced by the PyO3 wrapper before calling this
 /// function):
-/// - `energies` is a view over a C-contiguous f64 buffer.
+/// - `energies` is a view over a C-contiguous buffer of element type `T`.
 /// - `energies.ndim() == start_idx.len() == end_idx.len()`, in `[2, 7]`.
 /// - Both `start_idx` and `end_idx` are in bounds and reference non-NaN cells.
 /// - `energies.len() <= u32::MAX`.
-pub fn iwf_grid_inner(
-    energies: ArrayViewD<'_, f64>,
+pub fn iwf_grid_inner<T: Scalar>(
+    energies: ArrayViewD<'_, T>,
     start_idx: &[usize],
     end_idx: &[usize],
     stencil: Stencil,
-) -> Option<(Vec<usize>, f64)> {
+) -> Option<(Vec<usize>, T)> {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
     let n_total = energies.len();
 
-    let flat: &[f64] = energies
+    let flat: &[T] = energies
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
@@ -41,7 +42,7 @@ pub fn iwf_grid_inner(
 
     // Sweep non-NaN cells, building `sorted` and the linear→compact remap.
     let mut remap: Vec<u32> = vec![u32::MAX; n_total];
-    let mut sorted: Vec<(u32, f64)> = Vec::with_capacity(n_total);
+    let mut sorted: Vec<(u32, T)> = Vec::with_capacity(n_total);
     for i in 0..n_total {
         let e = flat[i];
         if !e.is_nan() {
@@ -57,7 +58,7 @@ pub fn iwf_grid_inner(
     debug_assert_ne!(start_compact, u32::MAX);
     debug_assert_ne!(end_compact, u32::MAX);
 
-    sorted.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+    sorted.sort_unstable_by(|a, b| a.1.tcmp(&b.1));
 
     let n_valid = sorted.len();
     let mut dsu = DisjointSetUnion::new(n_valid);
@@ -173,6 +174,35 @@ mod tests {
             iwf_grid_inner(arr.view(), &[0, 0], &[2, 2], Stencil::Moore).unwrap();
         assert_eq!(e_m, 1.0);
         assert_eq!(idx, vec![1, 1]);
+    }
+
+    #[test]
+    fn iwf_f32_matches_f64() {
+        // Reuse the two_minima_separated_by_ridge_2d fixture, as f64 and f32.
+        let mut e64 = vec![10.0f64; 25];
+        e64[0] = 0.0;
+        e64[1] = 1.0;
+        e64[5] = 1.0;
+        e64[6] = 2.0;
+        e64[10] = 3.0;
+        e64[11] = 3.0;
+        e64[12] = 4.0; // saddle
+        e64[13] = 3.0;
+        e64[14] = 3.0;
+        e64[4 * 5 + 4] = 0.0;
+        e64[3 * 5 + 4] = 1.0;
+        e64[4 * 5 + 3] = 1.0;
+        e64[3 * 5 + 3] = 2.0;
+        let e32: Vec<f32> = e64.iter().map(|&x| x as f32).collect();
+        let a64 = Array::from_shape_vec(IxDyn(&[5, 5]), e64).unwrap();
+        let a32 = Array::from_shape_vec(IxDyn(&[5, 5]), e32).unwrap();
+
+        let (i64s, e64v) =
+            iwf_grid_inner(a64.view(), &[0, 0], &[4, 4], Stencil::VonNeumann).unwrap();
+        let (i32s, e32v) =
+            iwf_grid_inner(a32.view(), &[0, 0], &[4, 4], Stencil::VonNeumann).unwrap();
+        assert_eq!(i64s, i32s);
+        assert!((e64v - e32v as f64).abs() < 1e-4);
     }
 
     #[test]

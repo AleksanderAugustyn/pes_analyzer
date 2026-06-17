@@ -7,35 +7,36 @@ use ndarray::ArrayViewD;
 
 use crate::common::dsu::DisjointSetUnion;
 use crate::common::nd::{compute_strides, linear_to_index, Stencil};
+use crate::common::scalar::Scalar;
 
 /// Result of a full watershed flood. See `API.md` for the semantics.
-pub struct SegmentationResult {
+pub struct WatershedResult<T> {
     pub labels: Vec<i32>,
-    pub basins: Vec<(Vec<usize>, f64)>,
-    pub merges: Vec<(Vec<usize>, f64, u32, u32)>,
+    pub basins: Vec<(Vec<usize>, T)>,
+    pub merges: Vec<(Vec<usize>, T, u32, u32)>,
 }
 
 /// Full watershed flood with merge-tree recording.
 ///
 /// Preconditions (enforced by the PyO3 wrapper):
-/// - `energies` is a view over a C-contiguous f64 buffer.
+/// - `energies` is a view over a C-contiguous buffer of element type `T`.
 /// - `energies.ndim() in [2, 7]`.
 /// - `energies.len() <= u32::MAX`.
-pub fn watershed_segmentation_inner(
-    energies: ArrayViewD<'_, f64>,
+pub fn watershed_segmentation_inner<T: Scalar>(
+    energies: ArrayViewD<'_, T>,
     stencil: Stencil,
-) -> SegmentationResult {
+) -> WatershedResult<T> {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
     let n_total = energies.len();
 
-    let flat: &[f64] = energies
+    let flat: &[T] = energies
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
     // Sweep non-NaN cells, building `sorted` and the linear→compact remap.
     let mut remap: Vec<u32> = vec![u32::MAX; n_total];
-    let mut sorted: Vec<(u32, f64)> = Vec::with_capacity(n_total);
+    let mut sorted: Vec<(u32, T)> = Vec::with_capacity(n_total);
     for i in 0..n_total {
         let e = flat[i];
         if !e.is_nan() {
@@ -43,7 +44,7 @@ pub fn watershed_segmentation_inner(
             sorted.push((i as u32, e));
         }
     }
-    sorted.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+    sorted.sort_unstable_by(|a, b| a.1.tcmp(&b.1));
 
     let n_valid = sorted.len();
     let mut dsu = DisjointSetUnion::new(n_valid);
@@ -56,8 +57,8 @@ pub fn watershed_segmentation_inner(
     // the flood (its "initial flood basin"), before any later merge events.
     let mut compact_labels: Vec<u32> = vec![u32::MAX; n_valid];
 
-    let mut basins: Vec<(u32, f64)> = Vec::new();
-    let mut merges: Vec<(u32, f64, u32, u32)> = Vec::new();
+    let mut basins: Vec<(u32, T)> = Vec::new();
+    let mut merges: Vec<(u32, T, u32, u32)> = Vec::new();
 
     let mut nbrs: Vec<usize> = Vec::new();
 
@@ -143,16 +144,16 @@ pub fn watershed_segmentation_inner(
     }
 
     // Convert basin/merge linear indices into nd-indices for the Python API.
-    let basins_out: Vec<(Vec<usize>, f64)> = basins
+    let basins_out: Vec<(Vec<usize>, T)> = basins
         .iter()
         .map(|&(lin, e)| (linear_to_index(lin as usize, &shape, &strides), e))
         .collect();
-    let merges_out: Vec<(Vec<usize>, f64, u32, u32)> = merges
+    let merges_out: Vec<(Vec<usize>, T, u32, u32)> = merges
         .iter()
         .map(|&(lin, e, d, s)| (linear_to_index(lin as usize, &shape, &strides), e, d, s))
         .collect();
 
-    SegmentationResult {
+    WatershedResult {
         labels,
         basins: basins_out,
         merges: merges_out,
@@ -324,6 +325,38 @@ mod tests {
         assert_eq!(r_m.basins.len(), 2);
         assert_eq!(r_m.merges.len(), 1);
         assert_eq!(r_m.merges[0].1, 1.0);
+    }
+
+    #[test]
+    fn watershed_f32_matches_f64() {
+        // Reuse the merge_event_uses_deeper_shallower_convention fixture: a
+        // 1-D chain with all-distinct energies. A unique flood order (no
+        // tied cells) makes labels/basins/merges dtype-independent, so any
+        // divergence here is a genericization bug, not a tie-break artifact.
+        let e64 = vec![0.0f64, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0];
+        let e32: Vec<f32> = e64.iter().map(|&x| x as f32).collect();
+        let a64 = Array::from_shape_vec(IxDyn(&[1, 9]), e64).unwrap();
+        let a32 = Array::from_shape_vec(IxDyn(&[1, 9]), e32).unwrap();
+
+        let r64 = watershed_segmentation_inner(a64.view(), Stencil::VonNeumann);
+        let r32 = watershed_segmentation_inner(a32.view(), Stencil::VonNeumann);
+
+        assert_eq!(r64.labels, r32.labels);
+        let b64: Vec<Vec<usize>> = r64.basins.iter().map(|(i, _)| i.clone()).collect();
+        let b32: Vec<Vec<usize>> = r32.basins.iter().map(|(i, _)| i.clone()).collect();
+        assert_eq!(b64, b32);
+        for ((_, e64), (_, e32)) in r64.basins.iter().zip(&r32.basins) {
+            assert!((*e64 - *e32 as f64).abs() < 1e-4);
+        }
+        // Merge cells + ids must match; merge energies within tolerance.
+        let m64: Vec<(Vec<usize>, u32, u32)> =
+            r64.merges.iter().map(|(i, _, d, s)| (i.clone(), *d, *s)).collect();
+        let m32: Vec<(Vec<usize>, u32, u32)> =
+            r32.merges.iter().map(|(i, _, d, s)| (i.clone(), *d, *s)).collect();
+        assert_eq!(m64, m32);
+        for ((_, e64, _, _), (_, e32, _, _)) in r64.merges.iter().zip(&r32.merges) {
+            assert!((*e64 - *e32 as f64).abs() < 1e-4);
+        }
     }
 
     #[test]

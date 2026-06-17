@@ -8,6 +8,7 @@ use ndarray::ArrayViewD;
 
 use crate::common::dsu::DisjointSetUnion;
 use crate::common::nd::{compute_strides, index_to_linear, Stencil};
+use crate::common::scalar::Scalar;
 
 /// Kruskal-forest node payload. Leaves are basins; events carry the saddle
 /// cell, the already-flooded neighbour on the other component, and which
@@ -26,10 +27,11 @@ enum NodeKind {
 /// linear indices (first = start, last = end). `None` if the endpoints
 /// never connect within the non-NaN region.
 ///
-/// Preconditions (enforced by the PyO3 wrapper): C-contiguous f64 view,
-/// ndim in [2, 7], endpoints in bounds and non-NaN, len <= u32::MAX.
-pub fn mep_inner(
-    energies: ArrayViewD<'_, f64>,
+/// Preconditions (enforced by the PyO3 wrapper): C-contiguous view of
+/// element type `T`, ndim in [2, 7], endpoints in bounds and non-NaN,
+/// len <= u32::MAX.
+pub fn mep_inner<T: Scalar>(
+    energies: ArrayViewD<'_, T>,
     start_idx: &[usize],
     end_idx: &[usize],
     stencil: Stencil,
@@ -38,7 +40,7 @@ pub fn mep_inner(
     let strides = compute_strides(&shape);
     let n_total = energies.len();
 
-    let flat: &[f64] = energies
+    let flat: &[T] = energies
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
@@ -51,7 +53,7 @@ pub fn mep_inner(
     // Compact remap + ascending-energy schedule, as in watershed.rs.
     let mut remap: Vec<u32> = vec![u32::MAX; n_total];
     let mut lin_of: Vec<u32> = Vec::new();
-    let mut sorted: Vec<(u32, f64)> = Vec::with_capacity(n_total);
+    let mut sorted: Vec<(u32, T)> = Vec::with_capacity(n_total);
     for i in 0..n_total {
         let e = flat[i];
         if !e.is_nan() {
@@ -60,7 +62,7 @@ pub fn mep_inner(
             sorted.push((i as u32, e));
         }
     }
-    sorted.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+    sorted.sort_unstable_by(|a, b| a.1.tcmp(&b.1));
 
     let start_compact = remap[start_lin];
     let end_compact = remap[end_lin];
@@ -345,6 +347,32 @@ mod tests {
         ];
         let arr = to_dyn([3, 5], e);
         assert!(mep_inner(arr.view(), &[1, 0], &[1, 4], Stencil::VonNeumann).is_none());
+    }
+
+    #[test]
+    fn mep_f32_matches_f64() {
+        // Reuse the path_crosses_ridge_at_iwf_saddle fixture, as f64 and f32.
+        let mut e64 = vec![10.0f64; 25];
+        e64[0] = 0.0;
+        e64[1] = 1.0;
+        e64[5] = 1.0;
+        e64[6] = 2.0;
+        e64[10] = 3.0;
+        e64[11] = 3.0;
+        e64[12] = 4.0;
+        e64[13] = 3.0;
+        e64[14] = 3.0;
+        e64[4 * 5 + 4] = 0.0;
+        e64[3 * 5 + 4] = 1.0;
+        e64[4 * 5 + 3] = 1.0;
+        e64[3 * 5 + 3] = 2.0;
+        let e32: Vec<f32> = e64.iter().map(|&x| x as f32).collect();
+        let a64 = Array::from_shape_vec(IxDyn(&[5, 5]), e64).unwrap();
+        let a32 = Array::from_shape_vec(IxDyn(&[5, 5]), e32).unwrap();
+
+        let r64 = mep_inner(a64.view(), &[0, 0], &[4, 4], Stencil::VonNeumann);
+        let r32 = mep_inner(a32.view(), &[0, 0], &[4, 4], Stencil::VonNeumann);
+        assert_eq!(r64, r32);
     }
 
     #[test]
