@@ -10,9 +10,15 @@ def _ok_grid_2d() -> np.ndarray:
     return np.zeros((4, 4), dtype=np.float64)
 
 
-def test_wrong_dtype_raises_typeerror():
+def test_float32_is_accepted():
+    # float32 is now a first-class energy dtype (see test_dtype.py).
     e = np.zeros((4, 4), dtype=np.float32)
-    with pytest.raises(TypeError):
+    assert find_iwf_grid(e, (0, 0), (3, 3)) is not None
+
+
+def test_non_float_dtype_raises_valueerror():
+    e = np.zeros((4, 4), dtype=np.int32)
+    with pytest.raises(ValueError):
         find_iwf_grid(e, (0, 0), (3, 3))
 
 

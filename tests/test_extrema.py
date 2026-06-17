@@ -88,9 +88,15 @@ def test_rejects_non_contiguous():
         find_minima_grid(sliced)
 
 
-def test_rejects_non_float64():
+def test_accepts_float32():
+    # float32 is now a first-class energy dtype (see test_dtype.py).
     e = np.zeros((3, 3), dtype=np.float32)
-    with pytest.raises(TypeError):
+    find_minima_grid(e)  # must not raise
+
+
+def test_rejects_non_float_dtype():
+    e = np.zeros((3, 3), dtype=np.int32)
+    with pytest.raises(ValueError):
         find_minima_grid(e)
 
 
@@ -286,9 +292,15 @@ def test_maxima_rejects_non_contiguous():
         find_maxima_grid(sliced)
 
 
-def test_maxima_rejects_non_float64():
+def test_maxima_accepts_float32():
+    # float32 is now a first-class energy dtype (see test_dtype.py).
     e = np.zeros((3, 3), dtype=np.float32)
-    with pytest.raises(TypeError):
+    find_maxima_grid(e)  # must not raise
+
+
+def test_maxima_rejects_non_float_dtype():
+    e = np.zeros((3, 3), dtype=np.int32)
+    with pytest.raises(ValueError):
         find_maxima_grid(e)
 
 
