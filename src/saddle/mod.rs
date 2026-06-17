@@ -7,6 +7,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyModule, PyTuple};
 
+use crate::common::scalar::Scalar;
 use crate::common::validate::{
     check_index_in_bounds, check_index_length, check_ndim, check_total_cells_fit_u32,
     coerce_signed_indices, parse_neighborhood,
@@ -16,7 +17,25 @@ use crate::common::validate::{
 #[pyo3(name = "find_iwf_grid", signature = (energies, start, end, neighborhood = "von_neumann"))]
 fn py_find_iwf_grid<'py>(
     py: Python<'py>,
-    energies: PyReadonlyArrayDyn<'py, f64>,
+    energies: &Bound<'py, PyAny>,
+    start: Vec<i64>,
+    end: Vec<i64>,
+    neighborhood: &str,
+) -> PyResult<Option<(Py<PyTuple>, f64)>> {
+    if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f32>>() {
+        run_find_iwf(py, a, start, end, neighborhood)
+    } else if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f64>>() {
+        run_find_iwf(py, a, start, end, neighborhood)
+    } else {
+        Err(PyValueError::new_err(
+            "energies dtype must be float32 or float64",
+        ))
+    }
+}
+
+fn run_find_iwf<'py, T: Scalar>(
+    py: Python<'py>,
+    energies: PyReadonlyArrayDyn<'py, T>,
     start: Vec<i64>,
     end: Vec<i64>,
     neighborhood: &str,
@@ -64,7 +83,7 @@ fn py_find_iwf_grid<'py>(
         None => Ok(None),
         Some((idx, energy)) => {
             let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py))).unbind();
-            Ok(Some((idx_tuple, energy)))
+            Ok(Some((idx_tuple, energy.to_f64())))
         }
     }
 }

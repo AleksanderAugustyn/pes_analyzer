@@ -8,6 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
 
+use crate::common::scalar::Scalar;
 use crate::common::validate::{
     check_confirm_range, check_ndim, check_neighborhood_range, check_total_cells_fit_u32,
 };
@@ -19,7 +20,25 @@ use crate::common::validate::{
 )]
 fn py_find_minima_grid<'py>(
     py: Python<'py>,
-    energies: PyReadonlyArrayDyn<'py, f64>,
+    energies: &Bound<'py, PyAny>,
+    neighborhood_range: usize,
+    confirm_range: Option<usize>,
+) -> PyResult<Py<PyList>> {
+    // Extraction order is f32 THEN f64: an f64 array does not extract as f32.
+    if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f32>>() {
+        run_find_minima(py, a, neighborhood_range, confirm_range)
+    } else if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f64>>() {
+        run_find_minima(py, a, neighborhood_range, confirm_range)
+    } else {
+        Err(PyValueError::new_err(
+            "energies dtype must be float32 or float64",
+        ))
+    }
+}
+
+fn run_find_minima<'py, T: Scalar>(
+    py: Python<'py>,
+    energies: PyReadonlyArrayDyn<'py, T>,
     neighborhood_range: usize,
     confirm_range: Option<usize>,
 ) -> PyResult<Py<PyList>> {
@@ -44,7 +63,7 @@ fn py_find_minima_grid<'py>(
     let list = PyList::empty_bound(py);
     for (idx, energy) in result {
         let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py)));
-        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.into_py(py)]);
+        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.to_f64().into_py(py)]);
         list.append(pair)?;
     }
     Ok(list.unbind())
@@ -57,7 +76,24 @@ fn py_find_minima_grid<'py>(
 )]
 fn py_find_maxima_grid<'py>(
     py: Python<'py>,
-    energies: PyReadonlyArrayDyn<'py, f64>,
+    energies: &Bound<'py, PyAny>,
+    neighborhood_range: usize,
+    confirm_range: Option<usize>,
+) -> PyResult<Py<PyList>> {
+    if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f32>>() {
+        run_find_maxima(py, a, neighborhood_range, confirm_range)
+    } else if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f64>>() {
+        run_find_maxima(py, a, neighborhood_range, confirm_range)
+    } else {
+        Err(PyValueError::new_err(
+            "energies dtype must be float32 or float64",
+        ))
+    }
+}
+
+fn run_find_maxima<'py, T: Scalar>(
+    py: Python<'py>,
+    energies: PyReadonlyArrayDyn<'py, T>,
     neighborhood_range: usize,
     confirm_range: Option<usize>,
 ) -> PyResult<Py<PyList>> {
@@ -80,7 +116,7 @@ fn py_find_maxima_grid<'py>(
     let list = PyList::empty_bound(py);
     for (idx, energy) in result {
         let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py)));
-        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.into_py(py)]);
+        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.to_f64().into_py(py)]);
         list.append(pair)?;
     }
     Ok(list.unbind())
@@ -93,7 +129,24 @@ fn py_find_maxima_grid<'py>(
 )]
 fn py_find_extrema_grid<'py>(
     py: Python<'py>,
-    energies: PyReadonlyArrayDyn<'py, f64>,
+    energies: &Bound<'py, PyAny>,
+    neighborhood_range: usize,
+    confirm_range: Option<usize>,
+) -> PyResult<Py<PyTuple>> {
+    if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f32>>() {
+        run_find_extrema(py, a, neighborhood_range, confirm_range)
+    } else if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f64>>() {
+        run_find_extrema(py, a, neighborhood_range, confirm_range)
+    } else {
+        Err(PyValueError::new_err(
+            "energies dtype must be float32 or float64",
+        ))
+    }
+}
+
+fn run_find_extrema<'py, T: Scalar>(
+    py: Python<'py>,
+    energies: PyReadonlyArrayDyn<'py, T>,
     neighborhood_range: usize,
     confirm_range: Option<usize>,
 ) -> PyResult<Py<PyTuple>> {
@@ -116,14 +169,14 @@ fn py_find_extrema_grid<'py>(
     let mins_list = PyList::empty_bound(py);
     for (idx, energy) in mins {
         let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py)));
-        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.into_py(py)]);
+        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.to_f64().into_py(py)]);
         mins_list.append(pair)?;
     }
 
     let maxes_list = PyList::empty_bound(py);
     for (idx, energy) in maxes {
         let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py)));
-        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.into_py(py)]);
+        let pair = PyTuple::new_bound(py, [idx_tuple.into_py(py), energy.to_f64().into_py(py)]);
         maxes_list.append(pair)?;
     }
 

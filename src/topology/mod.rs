@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
 
 use crate::common::nd::{compute_strides, linear_to_index};
+use crate::common::scalar::Scalar;
 use crate::common::validate::{
     check_index_in_bounds, check_index_length, check_ndim, check_total_cells_fit_u32,
     coerce_signed_indices, parse_neighborhood,
@@ -20,7 +21,23 @@ use crate::common::validate::{
 #[pyo3(name = "find_watershed_segmentation", signature = (energies, neighborhood = "von_neumann"))]
 fn py_find_watershed_segmentation<'py>(
     py: Python<'py>,
-    energies: PyReadonlyArrayDyn<'py, f64>,
+    energies: &Bound<'py, PyAny>,
+    neighborhood: &str,
+) -> PyResult<(Py<PyArrayDyn<i32>>, Py<PyList>, Py<PyList>)> {
+    if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f32>>() {
+        run_find_watershed_segmentation(py, a, neighborhood)
+    } else if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f64>>() {
+        run_find_watershed_segmentation(py, a, neighborhood)
+    } else {
+        Err(PyValueError::new_err(
+            "energies dtype must be float32 or float64",
+        ))
+    }
+}
+
+fn run_find_watershed_segmentation<'py, T: Scalar>(
+    py: Python<'py>,
+    energies: PyReadonlyArrayDyn<'py, T>,
     neighborhood: &str,
 ) -> PyResult<(Py<PyArrayDyn<i32>>, Py<PyList>, Py<PyList>)> {
     if !energies.is_c_contiguous() {
@@ -46,7 +63,7 @@ fn py_find_watershed_segmentation<'py>(
         py,
         result.basins.iter().map(|(idx, e)| {
             let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py)));
-            PyTuple::new_bound(py, [idx_tuple.into_py(py), (*e).into_py(py)])
+            PyTuple::new_bound(py, [idx_tuple.into_py(py), (*e).to_f64().into_py(py)])
         }),
     )
     .unbind();
@@ -59,7 +76,7 @@ fn py_find_watershed_segmentation<'py>(
                 py,
                 [
                     idx_tuple.into_py(py),
-                    (*e).into_py(py),
+                    (*e).to_f64().into_py(py),
                     (*d).into_py(py),
                     (*s).into_py(py),
                 ],
@@ -75,7 +92,25 @@ fn py_find_watershed_segmentation<'py>(
 #[pyo3(name = "find_minimum_energy_path", signature = (energies, start, end, neighborhood = "von_neumann"))]
 fn py_find_minimum_energy_path<'py>(
     py: Python<'py>,
-    energies: PyReadonlyArrayDyn<'py, f64>,
+    energies: &Bound<'py, PyAny>,
+    start: Vec<i64>,
+    end: Vec<i64>,
+    neighborhood: &str,
+) -> PyResult<Option<(Py<PyArray2<i64>>, Py<PyArray1<f64>>)>> {
+    if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f32>>() {
+        run_find_minimum_energy_path(py, a, start, end, neighborhood)
+    } else if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f64>>() {
+        run_find_minimum_energy_path(py, a, start, end, neighborhood)
+    } else {
+        Err(PyValueError::new_err(
+            "energies dtype must be float32 or float64",
+        ))
+    }
+}
+
+fn run_find_minimum_energy_path<'py, T: Scalar>(
+    py: Python<'py>,
+    energies: PyReadonlyArrayDyn<'py, T>,
     start: Vec<i64>,
     end: Vec<i64>,
     neighborhood: &str,
@@ -120,7 +155,7 @@ fn py_find_minimum_energy_path<'py>(
             for &lin in &path_lin {
                 let nd_idx = linear_to_index(lin, &shape, &strides);
                 idx_flat.extend(nd_idx.iter().map(|&i| i as i64));
-                path_e.push(flat[lin]);
+                path_e.push(flat[lin].to_f64());
             }
             let indices = Array2::from_shape_vec((k, ndim), idx_flat)
                 .map_err(|e| PyValueError::new_err(format!("path reshape failed: {e}")))?;
