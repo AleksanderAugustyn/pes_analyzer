@@ -4,7 +4,7 @@ This is the canonical contract for the three public functions of `pes_analyzer`.
 
 ## Conventions
 
-- All energy grids are C-contiguous `numpy.ndarray[float64]`. Pass `np.ascontiguousarray(arr)` if you have a non-contiguous view.
+- Energy grids are C-contiguous `numpy.ndarray`. Both `float64` and `float32` are accepted at the kernel boundary (extraction tries `float32` then `float64`); an `f64` array is processed as `f64`. Pass `np.ascontiguousarray(arr)` if you have a non-contiguous view.
 - N-D indices are `tuple[int, ...]` in `numpy` axis order.
 - `NaN` cells are treated as masked. They are impassable for saddle search and excluded from minimum search.
 - Supported dimensionality: N ∈ [2, 7]. The Rust kernels enforce this at the boundary.
@@ -19,7 +19,9 @@ from pes_analyzer.grid import build_dense
 def build_dense(
     coords: dict[str, numpy.ndarray],
     values: numpy.ndarray,
-) -> tuple[numpy.ndarray[float64], dict[str, numpy.ndarray]]:
+    *,
+    dtype: numpy.typing.DTypeLike | None = None,
+) -> tuple[numpy.ndarray, dict[str, numpy.ndarray]]:
     ...
 ```
 
@@ -27,10 +29,11 @@ def build_dense(
 
 - **`coords`** — Ordered mapping `{axis_name: coord_per_row_1d_array}`. The insertion order of the dict determines the axis order of the output ndarray. Each coordinate array must have length `len(values)`.
 - **`values`** — 1-D array of scalars (energies or any per-row value).
+- **`dtype`** *(keyword-only, default `None`)* — output dtype. When `None`, the dtype of `values` is preserved if it is floating, else `np.float64`; an explicit `dtype` forces the output to that type. Pass `np.float32` to halve the memory footprint of large grids — the kernels accept the resulting `f32` grid directly.
 
 ### Returns
 
-- **`dense`** — C-contiguous `float64` array of shape `(n_unique_axis_0, ..., n_unique_axis_{N-1})`. Missing cells are `np.nan`.
+- **`dense`** — C-contiguous array of shape `(n_unique_axis_0, ..., n_unique_axis_{N-1})`, dtype per the `dtype` rule above (`float64` by default for `float64`/integer input). Missing cells are `np.nan`.
 - **`axes`** — `{axis_name: sorted_unique_values_1d_array}`, same key order as `coords`.
 
 ### Raises

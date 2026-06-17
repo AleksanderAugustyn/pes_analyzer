@@ -117,3 +117,25 @@ def test_output_is_c_contiguous():
     values = np.array([10.0, 20.0, 30.0, 40.0])
     dense, _ = build_dense(coords, values)
     assert dense.flags["C_CONTIGUOUS"]
+
+
+def test_build_dense_float32_preserved():
+    coords = {"x": np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float32),
+              "y": np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32)}
+    vals = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    dense, axes = build_dense(coords, vals)
+    assert dense.dtype == np.float32
+
+
+def test_build_dense_dtype_override():
+    coords = {"x": np.array([0.0, 1.0], dtype=np.float64)}
+    vals = np.array([1.0, 2.0], dtype=np.float64)
+    dense, _ = build_dense(coords, vals, dtype=np.float32)
+    assert dense.dtype == np.float32
+
+
+def test_build_dense_float64_back_compat():
+    coords = {"x": np.array([0.0, 1.0], dtype=np.float64)}
+    vals = np.array([1.0, 2.0], dtype=np.float64)
+    dense, _ = build_dense(coords, vals)
+    assert dense.dtype == np.float64

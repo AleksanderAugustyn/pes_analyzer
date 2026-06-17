@@ -1,8 +1,8 @@
 """pes_analyzer.grid: dense N-D ndarray construction from sparse coords.
 
 This is the canonical scatter-to-dense helper paired with the Rust
-kernels in ``pes_analyzer.saddle`` and ``pes_analyzer.minimum``. Pure
-NumPy; no polars dependency.
+kernels in ``pes_analyzer.saddle``, ``pes_analyzer.extrema``, and
+``pes_analyzer.topology``. Pure NumPy; no polars dependency.
 """
 
 from __future__ import annotations
@@ -16,7 +16,9 @@ __all__ = ["build_dense"]
 def build_dense(
     coords: dict[str, npt.NDArray],
     values: npt.NDArray,
-) -> tuple[npt.NDArray[np.float64], dict[str, npt.NDArray]]:
+    *,
+    dtype: npt.DTypeLike | None = None,
+) -> tuple[npt.NDArray, dict[str, npt.NDArray]]:
     """Scatter (coord_per_row, value_per_row) data into a dense N-D ndarray.
 
     Parameters
@@ -28,13 +30,18 @@ def build_dense(
         coordinate array must have length equal to ``len(values)``.
     values
         1-D array of scalars (energies or any per-row value).
+    dtype
+        Output dtype (keyword-only). When ``None`` (default), the dtype of
+        ``values`` is preserved if it is floating, else ``np.float64``. An
+        explicit ``dtype`` forces the output to that type. Use ``np.float32``
+        to halve the memory footprint of large grids.
 
     Returns
     -------
     dense
-        C-contiguous ``float64`` array of shape
-        ``(n_unique_axis_0, ..., n_unique_axis_{N-1})``. Missing cells
-        are ``np.nan``.
+        C-contiguous array of shape
+        ``(n_unique_axis_0, ..., n_unique_axis_{N-1})`` and dtype per the
+        ``dtype`` rule above. Missing cells are ``np.nan``.
     axes
         ``{axis_name: sorted_unique_values_1d_array}``, same key order
         as ``coords``.
@@ -68,9 +75,14 @@ def build_dense(
     }
     shape = tuple(len(uniques[name]) for name in axis_names)
 
-    dense = np.full(shape, np.nan, dtype=np.float64)
+    out_dtype = dtype or (
+        values.dtype
+        if np.issubdtype(np.asarray(values).dtype, np.floating)
+        else np.float64
+    )
+    dense = np.full(shape, np.nan, dtype=out_dtype)
     idx_per_axis = tuple(
         np.searchsorted(uniques[name], coords[name]) for name in axis_names
     )
-    dense[idx_per_axis] = np.asarray(values, dtype=np.float64)
+    dense[idx_per_axis] = np.asarray(values, dtype=out_dtype)
     return dense, uniques
