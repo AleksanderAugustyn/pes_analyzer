@@ -7,6 +7,7 @@
 use ndarray::ArrayViewD;
 
 use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
+use crate::common::scalar::Scalar;
 
 /// Sort direction for the finalised output of a single-polarity search.
 enum SortOrder {
@@ -15,21 +16,21 @@ enum SortOrder {
 }
 
 /// Convert flat `(lin, energy)` pairs into `(nd_index, energy)` and sort
-/// them in the requested order. Ties broken by `f64::total_cmp` for
-/// determinism.
-fn finalize(
-    raw: Vec<(usize, f64)>,
+/// them in the requested order. Ties broken by `Scalar::tcmp`
+/// (total ordering, NaN-safe) for determinism.
+fn finalize<T: Scalar>(
+    raw: Vec<(usize, T)>,
     shape: &[usize],
     strides: &[usize],
     order: SortOrder,
-) -> Vec<(Vec<usize>, f64)> {
-    let mut out: Vec<(Vec<usize>, f64)> = raw
+) -> Vec<(Vec<usize>, T)> {
+    let mut out: Vec<(Vec<usize>, T)> = raw
         .into_iter()
         .map(|(lin, e)| (linear_to_index(lin, shape, strides), e))
         .collect();
     match order {
-        SortOrder::Ascending => out.sort_by(|a, b| a.1.total_cmp(&b.1)),
-        SortOrder::Descending => out.sort_by(|a, b| b.1.total_cmp(&a.1)),
+        SortOrder::Ascending => out.sort_by(|a, b| a.1.tcmp(&b.1)),
+        SortOrder::Descending => out.sort_by(|a, b| b.1.tcmp(&a.1)),
     }
     out
 }
@@ -46,30 +47,30 @@ fn finalize(
 /// `lin` to an nd-index and sort.
 ///
 /// Preconditions (enforced by the PyO3 wrapper before calling):
-/// - `energies` is a view over a C-contiguous f64 buffer.
+/// - `energies` is a view over a C-contiguous buffer of element type `T`.
 /// - `energies.ndim()` is in `[2, 7]`.
 /// - `energies.len() <= u32::MAX`.
 /// - `find_r >= 1` (validated upstream).
 /// - `confirm_r`, if `Some(R)`, satisfies `R in [1, 5]`; values `R <= find_r` are accepted but silently skipped (no-op).
-fn local_extreme_inner<C>(
-    energies: ArrayViewD<'_, f64>,
+fn local_extreme_inner<T: Scalar, C>(
+    energies: ArrayViewD<'_, T>,
     find_r: usize,
     confirm_r: Option<usize>,
     is_dominated: C,
-) -> Vec<(usize, f64)>
+) -> Vec<(usize, T)>
 where
-    C: Fn(f64, f64) -> bool + Copy,
+    C: Fn(T, T) -> bool + Copy,
 {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
-    let flat: &[f64] = energies
+    let flat: &[T] = energies
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
     // Stage 1: find candidates at `find_r`.
     let stencil_max = (2 * find_r + 1).saturating_pow(shape.len() as u32);
     let mut nbrs: Vec<usize> = Vec::with_capacity(stencil_max);
-    let mut candidates: Vec<(usize, f64)> = Vec::new();
+    let mut candidates: Vec<(usize, T)> = Vec::new();
 
     for (lin, &e) in flat.iter().enumerate() {
         if e.is_nan() {
@@ -103,7 +104,7 @@ where
         Some(r) if r > find_r => {
             let stencil_max_r = (2 * r + 1).saturating_pow(shape.len() as u32);
             let mut nbrs_r: Vec<usize> = Vec::with_capacity(stencil_max_r);
-            let mut kept: Vec<(usize, f64)> = Vec::with_capacity(candidates.len());
+            let mut kept: Vec<(usize, T)> = Vec::with_capacity(candidates.len());
             for (lin, e) in candidates {
                 full_neighbors(lin, &shape, &strides, r, &mut nbrs_r);
                 let mut has_valid_neighbor = false;
@@ -131,12 +132,12 @@ where
 
 /// Find all strict local minima in `energies` using the Chebyshev box of
 /// half-width `find_r`. See `local_extreme_inner` for parameter semantics.
-/// Output sorted ascending by energy; ties broken by `f64::total_cmp`.
-pub fn local_minima_inner(
-    energies: ArrayViewD<'_, f64>,
+/// Output sorted ascending by energy; ties broken by `Scalar::tcmp`.
+pub fn local_minima_inner<T: Scalar>(
+    energies: ArrayViewD<'_, T>,
     find_r: usize,
     confirm_r: Option<usize>,
-) -> Vec<(Vec<usize>, f64)> {
+) -> Vec<(Vec<usize>, T)> {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
     let raw = local_extreme_inner(energies, find_r, confirm_r, |ne, e| ne < e);
@@ -147,13 +148,13 @@ pub fn local_minima_inner(
 /// half-width `find_r`. Strict dual of `local_minima_inner`: a non-NaN
 /// cell qualifies iff at least one in-bounds non-NaN neighbour exists in
 /// the stencil and no such neighbour has strictly *higher* energy.
-/// Output sorted descending by energy; ties broken by `f64::total_cmp`
+/// Output sorted descending by energy; ties broken by `Scalar::tcmp`
 /// (reversed).
-pub fn local_maxima_inner(
-    energies: ArrayViewD<'_, f64>,
+pub fn local_maxima_inner<T: Scalar>(
+    energies: ArrayViewD<'_, T>,
     find_r: usize,
     confirm_r: Option<usize>,
-) -> Vec<(Vec<usize>, f64)> {
+) -> Vec<(Vec<usize>, T)> {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
     let raw = local_extreme_inner(energies, find_r, confirm_r, |ne, e| ne > e);
@@ -606,5 +607,27 @@ mod tests {
             let direct = local_maxima_inner(arr.view(), r, None);
             assert_eq!(two_pass, direct, "mismatch at r={r}");
         }
+    }
+
+    #[test]
+    fn local_minima_f32_matches_f64() {
+        // 5x5 paraboloid bowl: single interior minimum at the center (2,2).
+        let mut v64 = Vec::new();
+        for i in 0..5i64 {
+            for j in 0..5i64 {
+                v64.push(((i - 2).pow(2) + (j - 2).pow(2)) as f64);
+            }
+        }
+        let a64 = Array::from_shape_vec(IxDyn(&[5, 5]), v64.clone()).unwrap();
+        let v32: Vec<f32> = v64.iter().map(|&x| x as f32).collect();
+        let a32 = Array::from_shape_vec(IxDyn(&[5, 5]), v32).unwrap();
+
+        let r64 = local_minima_inner(a64.view(), 1, Some(2));
+        let r32 = local_minima_inner(a32.view(), 1, Some(2));
+
+        let i64s: Vec<Vec<usize>> = r64.into_iter().map(|(idx, _)| idx).collect();
+        let i32s: Vec<Vec<usize>> = r32.into_iter().map(|(idx, _)| idx).collect();
+        assert_eq!(i64s, i32s);
+        assert!(!i64s.is_empty(), "fixture should yield at least one minimum");
     }
 }

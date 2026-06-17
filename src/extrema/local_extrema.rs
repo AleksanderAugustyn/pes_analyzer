@@ -6,6 +6,7 @@
 use ndarray::ArrayViewD;
 
 use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
+use crate::common::scalar::Scalar;
 
 /// Find all strict local minima AND local maxima in `energies` in one
 /// sweep. Each non-NaN cell's neighbour walk updates both a
@@ -17,27 +18,27 @@ use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
 /// kernels. Minima are sorted ascending by energy; maxima descending.
 ///
 /// Preconditions (enforced by the PyO3 wrapper before calling):
-/// - `energies` is a view over a C-contiguous f64 buffer.
+/// - `energies` is a view over a C-contiguous buffer of element type `T`.
 /// - `energies.ndim()` is in `[2, 7]`.
 /// - `energies.len() <= u32::MAX`.
 /// - `find_r >= 1`.
 /// - `confirm_r`, if `Some(R)`, satisfies `R in [1, 5]`; `R <= find_r` is a no-op.
-pub fn local_extrema_inner(
-    energies: ArrayViewD<'_, f64>,
+pub fn local_extrema_inner<T: Scalar>(
+    energies: ArrayViewD<'_, T>,
     find_r: usize,
     confirm_r: Option<usize>,
-) -> (Vec<(Vec<usize>, f64)>, Vec<(Vec<usize>, f64)>) {
+) -> (Vec<(Vec<usize>, T)>, Vec<(Vec<usize>, T)>) {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
-    let flat: &[f64] = energies
+    let flat: &[T] = energies
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
     // Stage 1: single sweep, two flags per cell.
     let stencil_max = (2 * find_r + 1).saturating_pow(shape.len() as u32);
     let mut nbrs: Vec<usize> = Vec::with_capacity(stencil_max);
-    let mut min_candidates: Vec<(usize, f64)> = Vec::new();
-    let mut max_candidates: Vec<(usize, f64)> = Vec::new();
+    let mut min_candidates: Vec<(usize, T)> = Vec::new();
+    let mut max_candidates: Vec<(usize, T)> = Vec::new();
 
     for (lin, &e) in flat.iter().enumerate() {
         if e.is_nan() {
@@ -88,34 +89,34 @@ pub fn local_extrema_inner(
         _ => (min_candidates, max_candidates),
     };
 
-    let mut mins: Vec<(Vec<usize>, f64)> = min_kept
+    let mut mins: Vec<(Vec<usize>, T)> = min_kept
         .into_iter()
         .map(|(lin, e)| (linear_to_index(lin, &shape, &strides), e))
         .collect();
-    mins.sort_by(|a, b| a.1.total_cmp(&b.1));
+    mins.sort_by(|a, b| a.1.tcmp(&b.1));
 
-    let mut maxs: Vec<(Vec<usize>, f64)> = max_kept
+    let mut maxs: Vec<(Vec<usize>, T)> = max_kept
         .into_iter()
         .map(|(lin, e)| (linear_to_index(lin, &shape, &strides), e))
         .collect();
-    maxs.sort_by(|a, b| b.1.total_cmp(&a.1));
+    maxs.sort_by(|a, b| b.1.tcmp(&a.1));
 
     (mins, maxs)
 }
 
-fn confirm<C>(
-    candidates: &[(usize, f64)],
-    flat: &[f64],
+fn confirm<T: Scalar, C>(
+    candidates: &[(usize, T)],
+    flat: &[T],
     shape: &[usize],
     strides: &[usize],
     r: usize,
     nbrs: &mut Vec<usize>,
     is_dominated: C,
-) -> Vec<(usize, f64)>
+) -> Vec<(usize, T)>
 where
-    C: Fn(f64, f64) -> bool,
+    C: Fn(T, T) -> bool,
 {
-    let mut kept: Vec<(usize, f64)> = Vec::with_capacity(candidates.len());
+    let mut kept: Vec<(usize, T)> = Vec::with_capacity(candidates.len());
     for &(lin, e) in candidates {
         full_neighbors(lin, shape, strides, r, nbrs);
         let mut has_valid_neighbor = false;
