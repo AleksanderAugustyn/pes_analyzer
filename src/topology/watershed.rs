@@ -1,369 +1,391 @@
-//! Full watershed segmentation: flood the grid to completion, labeling
-//! every non-NaN cell with its initial basin and recording every union
-//! that merges two distinct basins as a `(saddle, deeper, shallower)`
-//! tuple.
+//! Full watershed flood: label every non-NaN cell with the basin it first
+//! joins and record every union of two distinct basins as a merge event.
+//! Indexed by linear cell id; the DSU root of every live component is the
+//! seed of its current (deepest) basin, so `labels[root]` is the basin id
+//! (see ALGORITHMS.md, "Flood kernel").
 
 use ndarray::ArrayViewD;
+use rayon::prelude::*;
 
-use crate::common::dsu::DisjointSetUnion;
-use crate::common::nd::{compute_strides, linear_to_index, Stencil};
+use crate::common::nd::{compute_strides, Stencil, PARENT_NONE};
 use crate::common::scalar::Scalar;
 
-/// Result of a full watershed flood. See `API.md` for the semantics.
-pub struct WatershedResult<T> {
-    pub labels: Vec<i32>,
-    pub basins: Vec<(Vec<usize>, T)>,
-    pub merges: Vec<(Vec<usize>, T, u32, u32)>,
+/// Options of one flood run.
+#[derive(Clone, Copy, Debug)]
+pub struct FloodOptions {
+    pub stencil: Stencil,
+    /// Record each cell's flood parent as a direction code (`parents`).
+    pub record_parents: bool,
+    /// Stop as soon as these two linear indices share a component
+    /// (the standalone MEP's early exit). Cells never reached keep label -1.
+    pub stop_when_connected: Option<(usize, usize)>,
 }
 
-/// Full watershed flood with merge-tree recording.
+/// One merge event: two distinct live basins met at `saddle` through its
+/// already-flooded neighbour `other`. `saddle_side` is the basin id of the
+/// saddle cell's own side at that moment (`deeper` or `shallower`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MergeEvent<T> {
+    pub saddle: u32,
+    pub other: u32,
+    pub energy: T,
+    pub deeper: u32,
+    pub shallower: u32,
+    pub saddle_side: u32,
+}
+
+/// Result of a flood. `basins[i] = (seed linear index, seed energy)`.
+pub struct FloodResult<T> {
+    pub labels: Vec<i32>,
+    pub parents: Option<Vec<u16>>,
+    pub basins: Vec<(u32, T)>,
+    pub merges: Vec<MergeEvent<T>>,
+}
+
+/// Representative of `x`'s component, with path halving.
+#[inline]
+fn find_root(parent: &mut [u32], mut x: u32) -> u32 {
+    loop {
+        let p = parent[x as usize];
+        if p == x {
+            return x;
+        }
+        let gp = parent[p as usize];
+        parent[x as usize] = gp;
+        x = gp;
+    }
+}
+
+/// Non-NaN cells in ascending `(energy, linear index)` order. The pair sort
+/// runs on the rayon pool; the order is independent of the thread count.
+/// Transient: size_of::<(T, u32)>() * V for the pairs (8V for f32, 16V for f64 —
+/// the f64 pair is padded to 16 bytes) plus 4V for the output: 12V / 20V.
+pub fn sorted_order<T: Scalar>(flat: &[T]) -> Vec<u32> {
+    let n_valid = flat.par_iter().filter(|e| !e.is_nan()).count();
+    let mut pairs: Vec<(T, u32)> = Vec::with_capacity(n_valid);
+    pairs.extend(
+        flat.iter()
+            .enumerate()
+            .filter(|(_, e)| !e.is_nan())
+            .map(|(i, &e)| (e, i as u32)),
+    );
+    pairs.par_sort_unstable_by(|a, b| a.0.tcmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut order: Vec<u32> = Vec::with_capacity(n_valid);
+    order.extend(pairs.iter().map(|p| p.1));
+    order
+}
+
+/// Flood `energies` in ascending order. Preconditions (enforced by the
+/// PyO3 wrapper): C-contiguous, ndim in [2, 7], len <= u32::MAX.
 ///
-/// Preconditions (enforced by the PyO3 wrapper):
-/// - `energies` is a view over a C-contiguous buffer of element type `T`.
-/// - `energies.ndim() in [2, 7]`.
-/// - `energies.len() <= u32::MAX`.
-pub fn watershed_segmentation_inner<T: Scalar>(
-    energies: ArrayViewD<'_, T>,
-    stencil: Stencil,
-) -> WatershedResult<T> {
+/// Peak resident memory: 8N + 4V bytes (+2N with `record_parents`) after the
+/// sort's 12V (f32) / 20V (f64) transient has been released.
+pub fn flood<T: Scalar>(energies: ArrayViewD<'_, T>, opts: FloodOptions) -> FloodResult<T> {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
     let n_total = energies.len();
-
     let flat: &[T] = energies
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
-    // Sweep non-NaN cells, building `sorted` and the linear→compact remap.
-    let mut remap: Vec<u32> = vec![u32::MAX; n_total];
-    let mut sorted: Vec<(u32, T)> = Vec::with_capacity(n_total);
-    for i in 0..n_total {
-        let e = flat[i];
-        if !e.is_nan() {
-            remap[i] = sorted.len() as u32;
-            sorted.push((i as u32, e));
-        }
-    }
-    sorted.sort_unstable_by(|a, b| a.1.tcmp(&b.1));
+    let order = sorted_order(flat);
 
-    let n_valid = sorted.len();
-    let mut dsu = DisjointSetUnion::new(n_valid);
-    let mut processed: Vec<bool> = vec![false; n_valid];
-    // basin_of_root[r] is the basin ID owned by the DSU component rooted at r.
-    // Only valid for cells currently acting as DSU roots; stale entries on
-    // non-root cells are never read (`dsu.find` does not return them).
-    let mut basin_of_root: Vec<u32> = vec![u32::MAX; n_valid];
-    // One basin ID per compact cell; the basin the cell FIRST joined during
-    // the flood (its "initial flood basin"), before any later merge events.
-    let mut compact_labels: Vec<u32> = vec![u32::MAX; n_valid];
-
+    let mut parent: Vec<u32> = (0..n_total as u32).collect();
+    let mut labels: Vec<i32> = vec![-1; n_total];
+    let mut parents: Option<Vec<u16>> = opts.record_parents.then(|| vec![PARENT_NONE; n_total]);
     let mut basins: Vec<(u32, T)> = Vec::new();
-    let mut merges: Vec<(u32, T, u32, u32)> = Vec::new();
+    let mut merges: Vec<MergeEvent<T>> = Vec::new();
+    let mut nbrs: Vec<(usize, u16)> = Vec::new();
 
-    let mut nbrs: Vec<usize> = Vec::new();
-
-    // `sorted` is iterated by index so we can re-sort the compact remap
-    // for nd-index lookup later. Indexing rather than `for &(...)` because
-    // the borrow checker disallows mutating `remap`/`compact_labels` while
-    // iterating `sorted` by reference.
-    for &(lin_u32, energy) in &sorted {
+    for &lin_u32 in &order {
         let lin = lin_u32 as usize;
-        let cur_compact = remap[lin];
-        processed[cur_compact as usize] = true;
+        let e = flat[lin];
+        opts.stencil.neighbors_with_codes(lin, &shape, &strides, &mut nbrs);
 
-        stencil.neighbors(lin, &shape, &strides, &mut nbrs);
-
-        // `my_basin` tracks the basin of the current cell's component as
-        // we process neighbors. It is set on the first processed neighbor
-        // and updated to the surviving basin after every merge event so
-        // that a third basin meeting the same cell merges with the
-        // already-survived basin, not the originally-adopted one.
+        // Basin and DSU root of the current cell's component while its
+        // neighbours are scanned; updated at every merge so a third basin
+        // meeting the same cell merges with the survivor.
         let mut my_basin: Option<u32> = None;
+        let mut my_root: u32 = lin_u32;
 
-        for &nbr_lin in &nbrs {
-            let nbr_compact = remap[nbr_lin];
-            if nbr_compact == u32::MAX || !processed[nbr_compact as usize] {
-                continue;
+        for &(nbr, code) in &nbrs {
+            if labels[nbr] < 0 {
+                continue; // NaN or not yet flooded
             }
-            let nbr_root = dsu.find(nbr_compact);
-            let nbr_basin = basin_of_root[nbr_root as usize];
-
+            let r = find_root(&mut parent, nbr as u32);
+            let b = labels[r as usize] as u32;
             match my_basin {
                 None => {
-                    // First processed neighbor: adopt its basin and union.
-                    my_basin = Some(nbr_basin);
-                    compact_labels[cur_compact as usize] = nbr_basin;
-                    dsu.union(cur_compact, nbr_root);
-                    let new_root = dsu.find(cur_compact);
-                    basin_of_root[new_root as usize] = nbr_basin;
+                    // First flooded neighbour: adopt its basin, hang under its root.
+                    parent[lin] = r;
+                    labels[lin] = b as i32;
+                    if let Some(p) = parents.as_mut() {
+                        p[lin] = code;
+                    }
+                    my_basin = Some(b);
+                    my_root = r;
                 }
-                Some(cur_basin) if cur_basin == nbr_basin => {
-                    // Same component already; union is no-op or maintains
-                    // structure. Refresh basin_of_root at the new root in
-                    // case the DSU re-parented.
-                    dsu.union(cur_compact, nbr_root);
-                    let new_root = dsu.find(cur_compact);
-                    basin_of_root[new_root as usize] = cur_basin;
+                Some(mb) if mb == b => {
+                    // One live component per basin id, so this is the same component.
+                    debug_assert_eq!(r, my_root);
                 }
-                Some(cur_basin) => {
-                    // Distinct basins meet at this cell — merge event.
-                    // Convention: deeper.min_e <= shallower.min_e.
-                    let (deeper, shallower) =
-                        if basins[cur_basin as usize].1 <= basins[nbr_basin as usize].1 {
-                            (cur_basin, nbr_basin)
-                        } else {
-                            (nbr_basin, cur_basin)
-                        };
-                    merges.push((lin_u32, energy, deeper, shallower));
-                    dsu.union(cur_compact, nbr_root);
-                    let new_root = dsu.find(cur_compact);
-                    basin_of_root[new_root as usize] = deeper;
+                Some(mb) => {
+                    // Two distinct basins meet here: merge, deeper survives.
+                    // Ids are monotone in (seed energy, seed index), so the
+                    // lower id is the deeper basin and ties resolve to the
+                    // lower seed index; basin 0 can never be `shallower`.
+                    let (deeper, shallower, deep_root, shallow_root) =
+                        if mb < b { (mb, b, my_root, r) } else { (b, mb, r, my_root) };
+                    parent[shallow_root as usize] = deep_root;
+                    my_root = deep_root;
+                    merges.push(MergeEvent {
+                        saddle: lin_u32,
+                        other: nbr as u32,
+                        energy: e,
+                        deeper,
+                        shallower,
+                        saddle_side: mb,
+                    });
                     my_basin = Some(deeper);
                 }
             }
         }
 
         if my_basin.is_none() {
-            // No processed neighbors → this cell starts a new basin.
-            // Because cells are processed in ascending energy order, the
-            // first cell of a component is also its minimum.
-            let new_id = basins.len() as u32;
-            basins.push((lin_u32, energy));
-            basin_of_root[cur_compact as usize] = new_id;
-            compact_labels[cur_compact as usize] = new_id;
+            // No flooded neighbour: this cell seeds a new basin and is its own root.
+            let id = basins.len() as u32;
+            basins.push((lin_u32, e));
+            labels[lin] = id as i32;
+        }
+
+        if let Some((a, b)) = opts.stop_when_connected {
+            if labels[a] >= 0
+                && labels[b] >= 0
+                && find_root(&mut parent, a as u32) == find_root(&mut parent, b as u32)
+            {
+                break;
+            }
         }
     }
 
-    // Expand compact labels back onto the full buffer; NaN cells get -1.
-    let mut labels: Vec<i32> = vec![-1; n_total];
-    for i in 0..n_total {
-        let c = remap[i];
-        if c != u32::MAX {
-            labels[i] = compact_labels[c as usize] as i32;
-        }
-    }
-
-    // Convert basin/merge linear indices into nd-indices for the Python API.
-    let basins_out: Vec<(Vec<usize>, T)> = basins
-        .iter()
-        .map(|&(lin, e)| (linear_to_index(lin as usize, &shape, &strides), e))
-        .collect();
-    let merges_out: Vec<(Vec<usize>, T, u32, u32)> = merges
-        .iter()
-        .map(|&(lin, e, d, s)| (linear_to_index(lin as usize, &shape, &strides), e, d, s))
-        .collect();
-
-    WatershedResult {
-        labels,
-        basins: basins_out,
-        merges: merges_out,
-    }
+    FloodResult { labels, parents, basins, merges }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::nd::linear_to_index;
     use ndarray::{Array, ArrayD, IxDyn};
 
     fn to_dyn<const N: usize>(shape: [usize; N], data: Vec<f64>) -> ArrayD<f64> {
         Array::from_shape_vec(IxDyn(&shape), data).unwrap()
     }
 
+    fn opts(stencil: Stencil) -> FloodOptions {
+        FloodOptions { stencil, record_parents: false, stop_when_connected: None }
+    }
+
+    fn ws(arr: &ArrayD<f64>, stencil: Stencil) -> FloodResult<f64> {
+        flood(arr.view(), opts(stencil))
+    }
+
+    fn nd(arr: &ArrayD<f64>, lin: u32) -> Vec<usize> {
+        let shape = arr.shape().to_vec();
+        let strides = compute_strides(&shape);
+        linear_to_index(lin as usize, &shape, &strides)
+    }
+
     #[test]
     fn single_basin_returns_one_label_no_merges() {
-        // 3x3 monotone bowl; minimum at (1,1)=0, increasing outward.
         let e = vec![5.0, 4.0, 5.0, 4.0, 0.0, 4.0, 5.0, 4.0, 5.0];
         let arr = to_dyn([3, 3], e);
-        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
+        let r = ws(&arr, Stencil::VonNeumann);
         assert_eq!(r.basins.len(), 1);
-        assert_eq!(r.basins[0], (vec![1, 1], 0.0));
+        assert_eq!(nd(&arr, r.basins[0].0), vec![1, 1]);
+        assert_eq!(r.basins[0].1, 0.0);
         assert!(r.merges.is_empty());
-        for &l in &r.labels {
-            assert_eq!(l, 0);
-        }
+        assert!(r.labels.iter().all(|&l| l == 0));
+        assert!(r.parents.is_none());
     }
 
     #[test]
     fn two_basins_separated_by_ridge_2d() {
-        // Same layout as iwf_grid::two_minima_separated_by_ridge_2d, with
-        // the second minimum offset slightly to break the basin-order tie.
         let mut e = vec![10.0; 25];
-        e[0] = 0.0;
-        e[1] = 1.0;
-        e[5] = 1.0;
-        e[6] = 2.0;
-        e[10] = 3.0;
-        e[11] = 3.0;
-        e[12] = 4.0;
-        e[13] = 3.0;
-        e[14] = 3.0;
-        e[4 * 5 + 4] = -0.1;          // slightly deeper than (0,0) basin
-        e[3 * 5 + 4] = 1.0;
-        e[4 * 5 + 3] = 1.0;
-        e[3 * 5 + 3] = 2.0;
+        e[0] = 0.0; e[1] = 1.0; e[5] = 1.0; e[6] = 2.0;
+        e[10] = 3.0; e[11] = 3.0; e[12] = 4.0; e[13] = 3.0; e[14] = 3.0;
+        e[4 * 5 + 4] = -0.1; e[3 * 5 + 4] = 1.0; e[4 * 5 + 3] = 1.0; e[3 * 5 + 3] = 2.0;
         let arr = to_dyn([5, 5], e);
-        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
+        let r = ws(&arr, Stencil::VonNeumann);
         assert_eq!(r.basins.len(), 2);
-        assert_eq!(r.basins[0], (vec![4, 4], -0.1));
-        assert_eq!(r.basins[1], (vec![0, 0], 0.0));
+        assert_eq!(nd(&arr, r.basins[0].0), vec![4, 4]);
+        assert_eq!(r.basins[0].1, -0.1);
+        assert_eq!(nd(&arr, r.basins[1].0), vec![0, 0]);
         assert_eq!(r.merges.len(), 1);
         let m = &r.merges[0];
-        assert_eq!(m.0, vec![2, 2]);
-        assert_eq!(m.1, 4.0);
-        assert_eq!(m.2, 0);             // deeper = basin (4,4) at E=-0.1
-        assert_eq!(m.3, 1);             // shallower = basin (0,0) at E=0.0
-        assert!(r.basins[m.2 as usize].1 <= r.basins[m.3 as usize].1);
+        assert_eq!(nd(&arr, m.saddle), vec![2, 2]);
+        assert_eq!(m.energy, 4.0);
+        assert_eq!(m.deeper, 0);
+        assert_eq!(m.shallower, 1);
+        assert!(m.saddle_side == 0 || m.saddle_side == 1);
+        // `other` is a stencil neighbour of the saddle on the other component.
+        let other_nd = nd(&arr, m.other);
+        let d: usize = other_nd.iter().zip([2usize, 2]).map(|(a, b)| a.abs_diff(b)).sum();
+        assert_eq!(d, 1);
+        assert_ne!(r.labels[m.other as usize], m.saddle_side as i32);
     }
 
     #[test]
     fn merge_event_uses_deeper_shallower_convention() {
-        // 1-D chain (shape [1, 9]) with three basins of distinct depth.
-        //
-        // positions: 0   1   2   3   4   5   6   7   8
-        // energies : 0   3   5   4   1   3   6   4   2
-        //          A.min     sad     B.min       sad   C.min
-        //
-        // Expect: basins ordered (A=0, B=1, C=2);
-        //         merge (pos=2, E=5, deeper=A=0, shallower=B=1);
-        //         merge (pos=6, E=6, deeper=A=0, shallower=C=2).
         let e = vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0];
         let arr = to_dyn([1, 9], e);
-        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
+        let r = ws(&arr, Stencil::VonNeumann);
         assert_eq!(r.basins.len(), 3);
-        assert_eq!(r.basins[0], (vec![0, 0], 0.0));
-        assert_eq!(r.basins[1], (vec![0, 4], 1.0));
-        assert_eq!(r.basins[2], (vec![0, 8], 2.0));
+        assert_eq!(r.basins.iter().map(|b| b.0).collect::<Vec<_>>(), vec![0, 4, 8]);
         assert_eq!(r.merges.len(), 2);
-        assert_eq!(r.merges[0], (vec![0, 2], 5.0, 0, 1));
-        assert_eq!(r.merges[1], (vec![0, 6], 6.0, 0, 2));
+        assert_eq!((r.merges[0].saddle, r.merges[0].energy, r.merges[0].deeper, r.merges[0].shallower), (2, 5.0, 0, 1));
+        assert_eq!((r.merges[1].saddle, r.merges[1].energy, r.merges[1].deeper, r.merges[1].shallower), (6, 6.0, 0, 2));
         for m in &r.merges {
-            assert!(r.basins[m.2 as usize].1 <= r.basins[m.3 as usize].1);
+            assert!(r.basins[m.deeper as usize].1 <= r.basins[m.shallower as usize].1);
+            assert!(m.saddle_side == m.deeper || m.saddle_side == m.shallower);
         }
     }
 
     #[test]
     fn nan_wall_yields_disconnected_basins() {
-        // 3x5 grid; middle column is NaN -> two disjoint non-NaN regions.
-        // Each half has a single distinct minimum (no ties) so basin
-        // count and ordering are deterministic.
         let nan = f64::NAN;
-        let e = vec![
-            5.0, 4.0, nan, 6.0, 7.0,
-            4.0, 0.0, nan, 1.0, 6.0,    // (1,1)=0 and (1,3)=1 are the two minima
-            5.0, 4.0, nan, 6.0, 7.0,
-        ];
+        let e = vec![5.0, 4.0, nan, 6.0, 7.0, 4.0, 0.0, nan, 1.0, 6.0, 5.0, 4.0, nan, 6.0, 7.0];
         let arr = to_dyn([3, 5], e);
-        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
+        let r = ws(&arr, Stencil::VonNeumann);
         assert_eq!(r.basins.len(), 2);
         assert!(r.merges.is_empty());
-        assert_eq!(r.basins[0], (vec![1, 1], 0.0));
-        assert_eq!(r.basins[1], (vec![1, 3], 1.0));
         for (i, &val) in arr.iter().enumerate() {
-            if val.is_nan() {
-                assert_eq!(r.labels[i], -1, "expected -1 at NaN cell {}", i);
-            } else {
-                assert!(r.labels[i] >= 0, "expected basin label at non-NaN cell {}", i);
-            }
+            if val.is_nan() { assert_eq!(r.labels[i], -1); } else { assert!(r.labels[i] >= 0); }
         }
     }
 
     #[test]
     fn basin_order_is_min_energy_ascending() {
-        // Hand-built grid with several basins of different depths.
-        let e = vec![
-            0.0, 5.0, 3.0, 5.0, 1.0, 5.0, 5.0, 5.0, 5.0, 5.0, 4.0, 5.0, 2.0, 5.0, 5.0,
-        ];
+        let e = vec![0.0, 5.0, 3.0, 5.0, 1.0, 5.0, 5.0, 5.0, 5.0, 5.0, 4.0, 5.0, 2.0, 5.0, 5.0];
         let arr = to_dyn([3, 5], e);
-        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
+        let r = ws(&arr, Stencil::VonNeumann);
         for w in r.basins.windows(2) {
-            assert!(
-                w[0].1 <= w[1].1,
-                "basins must be sorted ascending by min energy: {:?}",
-                r.basins
-            );
+            assert!(w[0].1 <= w[1].1);
         }
     }
 
     #[test]
-    fn labels_match_basin_indices_at_minima() {
+    fn labels_at_seeds_equal_basin_ids() {
         let e = vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0];
         let arr = to_dyn([1, 9], e);
-        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
-        // For each basin, the cell at its minimum index must carry that
-        // basin's id in `labels` (the cell that started the basin is
-        // initially labeled with the basin's own id).
-        for (basin_id, (idx, _e)) in r.basins.iter().enumerate() {
-            let strides = compute_strides(arr.shape());
-            let lin: usize = idx.iter().zip(strides.iter()).map(|(i, s)| i * s).sum();
-            assert_eq!(r.labels[lin], basin_id as i32);
-        }
-    }
-
-    #[test]
-    fn labels_minus_one_at_nan_cells() {
-        let nan = f64::NAN;
-        let e = vec![0.0, nan, 1.0, nan, 2.0, nan, 3.0, nan, 4.0];
-        let arr = to_dyn([3, 3], e);
-        let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
-        for (i, &val) in arr.iter().enumerate() {
-            if val.is_nan() {
-                assert_eq!(r.labels[i], -1);
-            }
+        let r = ws(&arr, Stencil::VonNeumann);
+        for (bid, (lin, _)) in r.basins.iter().enumerate() {
+            assert_eq!(r.labels[*lin as usize], bid as i32);
         }
     }
 
     #[test]
     fn moore_stencil_merges_through_diagonal() {
-        // Same diagonal-channel grid as the iwf test. Von Neumann sees
-        // three basins (corners and centre all axis-isolated by the 9s);
-        // Moore sees two corner basins merging through the centre at E=1.
         let e = vec![0.0, 9.0, 9.0, 9.0, 1.0, 9.0, 9.0, 9.0, 0.0];
         let arr = to_dyn([3, 3], e);
-        let r_vn = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
-        assert_eq!(r_vn.basins.len(), 3);
-        let r_m = watershed_segmentation_inner(arr.view(), Stencil::Moore);
+        assert_eq!(ws(&arr, Stencil::VonNeumann).basins.len(), 3);
+        let r_m = ws(&arr, Stencil::Moore);
         assert_eq!(r_m.basins.len(), 2);
         assert_eq!(r_m.merges.len(), 1);
-        assert_eq!(r_m.merges[0].1, 1.0);
+        assert_eq!(r_m.merges[0].energy, 1.0);
+    }
+
+    #[test]
+    fn tied_seeds_merge_with_the_lower_id_as_deeper_so_basin_zero_stays_root() {
+        // Two equal minima (lin 2 and lin 6). Whatever side the saddle cell
+        // adopts first, the merge must record deeper = 0, shallower = 1.
+        let e = vec![5.0, 4.0, 1.0, 4.0, 5.0, 4.0, 1.0, 4.0, 5.0];
+        let arr = to_dyn([1, 9], e);
+        let r = ws(&arr, Stencil::VonNeumann);
+        assert_eq!(r.merges.len(), 1);
+        assert_eq!((r.merges[0].deeper, r.merges[0].shallower), (0, 1));
+        // Mirror image: the saddle cell's first neighbour is on basin 1's side.
+        let e = vec![5.0, 4.0, 1.0, 4.0, 4.5, 5.0, 1.0, 4.0, 5.0];
+        let arr = to_dyn([1, 9], e);
+        let r = ws(&arr, Stencil::VonNeumann);
+        assert!(r.merges.iter().all(|m| m.shallower != 0));
+    }
+
+    #[test]
+    fn ties_resolve_by_ascending_linear_index() {
+        // Two equal minima at lin 2 and lin 6 on a 1x9 chain: basin 0 must be lin 2.
+        let e = vec![5.0, 4.0, 1.0, 4.0, 5.0, 4.0, 1.0, 4.0, 5.0];
+        let arr = to_dyn([1, 9], e);
+        let r = ws(&arr, Stencil::VonNeumann);
+        assert_eq!(r.basins[0].0, 2);
+        assert_eq!(r.basins[1].0, 6);
+        // Flat plateau: every cell equal -> one basin seeded at lin 0.
+        let flat = to_dyn([2, 3], vec![1.0; 6]);
+        let r = ws(&flat, Stencil::VonNeumann);
+        assert_eq!(r.basins.len(), 1);
+        assert_eq!(r.basins[0].0, 0);
+    }
+
+    #[test]
+    fn sorted_order_is_energy_then_index_and_skips_nan() {
+        let flat = [3.0f64, f64::NAN, 1.0, 3.0, 0.5];
+        assert_eq!(sorted_order(&flat), vec![4, 2, 0, 3]);
+    }
+
+    #[test]
+    fn parents_chains_descend_to_seeds_with_nonincreasing_energy() {
+        let e = vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0];
+        let arr = to_dyn([1, 9], e.clone());
+        let strides = compute_strides(arr.shape());
+        let r = flood(arr.view(), FloodOptions { stencil: Stencil::VonNeumann, record_parents: true, stop_when_connected: None });
+        let parents = r.parents.as_ref().unwrap();
+        let seeds: Vec<u32> = r.basins.iter().map(|b| b.0).collect();
+        for lin in 0..e.len() {
+            let mut c = lin;
+            let mut steps = 0;
+            while parents[c] != PARENT_NONE {
+                let next = crate::common::nd::apply_code(c, parents[c], &strides);
+                assert!(e[next] <= e[c], "chain must not ascend");
+                c = next;
+                steps += 1;
+                assert!(steps <= e.len());
+            }
+            assert!(seeds.contains(&(c as u32)), "chain from {lin} ends at non-seed {c}");
+        }
+        // Seeds carry the sentinel.
+        for &s in &seeds {
+            assert_eq!(parents[s as usize], PARENT_NONE);
+        }
+    }
+
+    #[test]
+    fn stop_when_connected_leaves_higher_cells_unlabelled() {
+        let e = vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0];
+        let arr = to_dyn([1, 9], e);
+        // Cols 0 and 4 connect at the saddle E=5 (col 2); E=6 at col 6 is never processed.
+        let r = flood(arr.view(), FloodOptions { stencil: Stencil::VonNeumann, record_parents: true, stop_when_connected: Some((0, 4)) });
+        assert_eq!(r.labels[6], -1);
+        assert_eq!(r.merges.len(), 1);
+        assert!(r.labels[0] >= 0 && r.labels[4] >= 0);
     }
 
     #[test]
     fn watershed_f32_matches_f64() {
-        // Reuse the merge_event_uses_deeper_shallower_convention fixture: a
-        // 1-D chain with all-distinct energies. A unique flood order (no
-        // tied cells) makes labels/basins/merges dtype-independent, so any
-        // divergence here is a genericization bug, not a tie-break artifact.
         let e64 = vec![0.0f64, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0];
         let e32: Vec<f32> = e64.iter().map(|&x| x as f32).collect();
         let a64 = Array::from_shape_vec(IxDyn(&[1, 9]), e64).unwrap();
         let a32 = Array::from_shape_vec(IxDyn(&[1, 9]), e32).unwrap();
-
-        let r64 = watershed_segmentation_inner(a64.view(), Stencil::VonNeumann);
-        let r32 = watershed_segmentation_inner(a32.view(), Stencil::VonNeumann);
-
+        let r64 = flood(a64.view(), opts(Stencil::VonNeumann));
+        let r32 = flood(a32.view(), opts(Stencil::VonNeumann));
         assert_eq!(r64.labels, r32.labels);
-        let b64: Vec<Vec<usize>> = r64.basins.iter().map(|(i, _)| i.clone()).collect();
-        let b32: Vec<Vec<usize>> = r32.basins.iter().map(|(i, _)| i.clone()).collect();
-        assert_eq!(b64, b32);
-        for ((_, e64), (_, e32)) in r64.basins.iter().zip(&r32.basins) {
-            assert!((*e64 - *e32 as f64).abs() < 1e-4);
-        }
-        // Merge cells + ids must match; merge energies within tolerance.
-        let m64: Vec<(Vec<usize>, u32, u32)> =
-            r64.merges.iter().map(|(i, _, d, s)| (i.clone(), *d, *s)).collect();
-        let m32: Vec<(Vec<usize>, u32, u32)> =
-            r32.merges.iter().map(|(i, _, d, s)| (i.clone(), *d, *s)).collect();
-        assert_eq!(m64, m32);
-        for ((_, e64, _, _), (_, e32, _, _)) in r64.merges.iter().zip(&r32.merges) {
-            assert!((*e64 - *e32 as f64).abs() < 1e-4);
+        assert_eq!(r64.basins.iter().map(|b| b.0).collect::<Vec<_>>(), r32.basins.iter().map(|b| b.0).collect::<Vec<_>>());
+        for (m64, m32) in r64.merges.iter().zip(&r32.merges) {
+            assert_eq!((m64.saddle, m64.other, m64.deeper, m64.shallower, m64.saddle_side), (m32.saddle, m32.other, m32.deeper, m32.shallower, m32.saddle_side));
+            assert!((m64.energy - m32.energy as f64).abs() < 1e-4);
         }
     }
 
     #[test]
     fn dimensionality_sweep_2_to_7() {
-        // For each ndim in 2..=7, build a tiny grid with two known minima.
-        // Shape (3, 1, 1, ..., 1): minima at (0,0,..,0)=0 and (2,0,..,0)=0;
-        // saddle at (1,0,..,0)=7.
         for ndim in 2..=7 {
             let mut shape = vec![1usize; ndim];
             shape[0] = 3;
@@ -372,10 +394,10 @@ mod tests {
             data[0] = 0.0;
             data[total - 1] = 0.0;
             let arr = Array::from_shape_vec(IxDyn(&shape), data).unwrap();
-            let r = watershed_segmentation_inner(arr.view(), Stencil::VonNeumann);
+            let r = flood(arr.view(), opts(Stencil::VonNeumann));
             assert_eq!(r.basins.len(), 2, "ndim={ndim}");
             assert_eq!(r.merges.len(), 1, "ndim={ndim}");
-            assert_eq!(r.merges[0].1, 7.0, "ndim={ndim}");
+            assert_eq!(r.merges[0].energy, 7.0, "ndim={ndim}");
         }
     }
 }

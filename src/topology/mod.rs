@@ -5,7 +5,7 @@ pub mod mep;
 pub mod watershed;
 
 use ndarray::{Array, Array1, Array2, IxDyn};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayDyn, PyReadonlyArrayDyn, PyUntypedArrayMethods};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
@@ -18,74 +18,89 @@ use crate::common::validate::{
 };
 
 #[pyfunction]
-#[pyo3(name = "find_watershed_segmentation", signature = (energies, neighborhood = "von_neumann"))]
+#[pyo3(name = "find_watershed_segmentation", signature = (energies, neighborhood = "von_neumann", parents = false))]
 fn py_find_watershed_segmentation<'py>(
     py: Python<'py>,
     energies: &Bound<'py, PyAny>,
     neighborhood: &str,
-) -> PyResult<(Py<PyArrayDyn<i32>>, Py<PyList>, Py<PyList>)> {
+    parents: bool,
+) -> PyResult<Py<PyTuple>> {
     if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f32>>() {
-        run_find_watershed_segmentation(py, a, neighborhood)
+        run_find_watershed_segmentation(py, a, neighborhood, parents)
     } else if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f64>>() {
-        run_find_watershed_segmentation(py, a, neighborhood)
+        run_find_watershed_segmentation(py, a, neighborhood, parents)
     } else {
-        Err(PyValueError::new_err(
-            "energies dtype must be float32 or float64",
-        ))
+        Err(PyValueError::new_err("energies dtype must be float32 or float64"))
     }
 }
 
+/// Returns `(labels, parents | None, basins, merges, merge_table)`; see
+/// `python/pes_analyzer/topology/_flood.py` for the Python-facing object.
 fn run_find_watershed_segmentation<'py, T: Scalar>(
     py: Python<'py>,
     energies: PyReadonlyArrayDyn<'py, T>,
     neighborhood: &str,
-) -> PyResult<(Py<PyArrayDyn<i32>>, Py<PyList>, Py<PyList>)> {
+    parents: bool,
+) -> PyResult<Py<PyTuple>> {
     if !energies.is_c_contiguous() {
         return Err(PyValueError::new_err(
             "energies must be C-contiguous; call np.ascontiguousarray(energies) if you intend a copy",
         ));
     }
     let arr = energies.as_array();
-    let ndim = arr.ndim();
-    check_ndim(ndim)?;
+    check_ndim(arr.ndim())?;
     check_total_cells_fit_u32(arr.len())?;
     let stencil = parse_neighborhood(neighborhood)?;
-
     let shape: Vec<usize> = arr.shape().to_vec();
-    let result = py.allow_threads(|| watershed::watershed_segmentation_inner(arr, stencil));
+    let strides = compute_strides(&shape);
 
-    // Reshape Vec<i32> labels into an ndarray matching `energies.shape`.
-    let labels_nd = Array::from_shape_vec(IxDyn(&shape), result.labels)
-        .map_err(|e| PyValueError::new_err(format!("labels reshape failed: {}", e)))?;
-    let labels_py = labels_nd.into_pyarray_bound(py).unbind();
+    let opts = watershed::FloodOptions { stencil, record_parents: parents, stop_when_connected: None };
+    let result = py.allow_threads(|| watershed::flood(arr, opts));
 
+    let labels_py = Array::from_shape_vec(IxDyn(&shape), result.labels)
+        .map_err(|e| PyValueError::new_err(format!("labels reshape failed: {e}")))?
+        .into_pyarray_bound(py)
+        .into_any();
+    let parents_py = match result.parents {
+        Some(p) => Array::from_shape_vec(IxDyn(&shape), p)
+            .map_err(|e| PyValueError::new_err(format!("parents reshape failed: {e}")))?
+            .into_pyarray_bound(py)
+            .into_any(),
+        None => py.None().into_bound(py),
+    };
+    let nd_tuple = |lin: u32| {
+        PyTuple::new_bound(py, linear_to_index(lin as usize, &shape, &strides).iter().map(|&i| i.into_py(py)))
+    };
     let basins_py = PyList::new_bound(
         py,
-        result.basins.iter().map(|(idx, e)| {
-            let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py)));
-            PyTuple::new_bound(py, [idx_tuple.into_py(py), (*e).to_f64().into_py(py)])
+        result.basins.iter().map(|&(lin, e)| {
+            PyTuple::new_bound(py, [nd_tuple(lin).into_py(py), e.to_f64().into_py(py)])
         }),
-    )
-    .unbind();
-
+    );
     let merges_py = PyList::new_bound(
         py,
-        result.merges.iter().map(|(idx, e, d, s)| {
-            let idx_tuple = PyTuple::new_bound(py, idx.iter().map(|&i| i.into_py(py)));
+        result.merges.iter().map(|m| {
             PyTuple::new_bound(
                 py,
-                [
-                    idx_tuple.into_py(py),
-                    (*e).to_f64().into_py(py),
-                    (*d).into_py(py),
-                    (*s).into_py(py),
-                ],
+                [nd_tuple(m.saddle).into_py(py), m.energy.to_f64().into_py(py), m.deeper.into_py(py), m.shallower.into_py(py)],
             )
         }),
-    )
-    .unbind();
+    );
+    let n_merges = result.merges.len();
+    let mut table: Vec<u32> = Vec::with_capacity(n_merges * 5);
+    for m in &result.merges {
+        table.extend_from_slice(&[m.saddle, m.other, m.deeper, m.shallower, m.saddle_side]);
+    }
+    let table_py = Array2::from_shape_vec((n_merges, 5), table)
+        .map_err(|e| PyValueError::new_err(format!("merge_table reshape failed: {e}")))?
+        .into_pyarray_bound(py)
+        .into_any();
 
-    Ok((labels_py, basins_py, merges_py))
+    Ok(PyTuple::new_bound(
+        py,
+        [labels_py, parents_py, basins_py.into_any(), merges_py.into_any(), table_py],
+    )
+    .unbind())
 }
 
 #[pyfunction]

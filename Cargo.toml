@@ -16,6 +16,7 @@ extension-module = ["pyo3/extension-module"]
 pyo3 = { version = "0.22", features = ["abi3-py310"] }
 numpy = "0.22"
 ndarray = "0.16"
+rayon = "1"
 
 [profile.release]
 lto = "fat"
