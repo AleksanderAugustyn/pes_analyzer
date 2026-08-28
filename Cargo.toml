@@ -1,5 +1,5 @@
 [package]
-name = "pes_analyzer"
+name = "pes-analyzer"
 version = "0.10.0"
 edition = "2024"
 description = "Fast saddle-point analysis on dense N-D PES grids"
