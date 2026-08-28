@@ -6,11 +6,11 @@ import math
 import numpy as np
 import pytest
 
-from pes_analyzer.topology import MergeTree, compute_persistence
+from pes_analyzer.topology import MergeTree, Watershed, compute_persistence
 
 
 def _actinide_chain():
-    """Hand-built (labels, basins, merges) for a 3-basin chain on a 5x5 grid.
+    """Hand-built Watershed for a 3-basin chain on a 5x5 grid.
 
     basin 0: min (0,0) E=0.0  (deepest, root)
     basin 1: min (2,2) E=1.0  -> merges into 0 at saddle (1,1) E=5.0
@@ -18,23 +18,19 @@ def _actinide_chain():
     labels: col 0..1 -> 0, cols 2..3 / rows -> 1, column 4 -> 2 (touches axis-1 max edge).
     """
     labels = np.array(
-        [
-            [0, 0, 1, 1, 2],
-            [0, 0, 1, 1, 2],
-            [0, 0, 1, 1, 2],
-            [0, 0, 1, 1, 2],
-            [0, 0, 1, 1, 2],
-        ],
+        [[0, 0, 1, 1, 2]] * 5,
         dtype=np.int32,
     )
     basins = [((0, 0), 0.0), ((2, 2), 1.0), ((4, 4), 2.0)]
     merges = [((1, 1), 5.0, 0, 1), ((3, 3), 4.0, 1, 2)]
-    return labels, basins, merges
+    return Watershed(labels=labels, basins=basins, merges=merges, neighborhood="von_neumann",
+                     parents=None, merge_table=np.zeros((2, 5), np.uint32),
+                     dtype=np.dtype("float64"), fingerprint=b"\x00" * 16)
 
 
 def test_construction_links_and_persistence():
-    labels, basins, merges = _actinide_chain()
-    tree = MergeTree(labels, basins, merges)
+    ws = _actinide_chain()
+    tree = MergeTree(ws)
 
     assert tree.root == 0
     root = tree.node(0)
@@ -57,28 +53,27 @@ def test_construction_links_and_persistence():
     assert n2.persistence == pytest.approx(4.0 - 2.0)
 
     # persistence agrees with the free function
-    p = compute_persistence(basins, merges)
+    p = compute_persistence(ws.basins, ws.merges)
     assert tree.persistence(2) == pytest.approx(p[2])
 
 
 def test_empty_tree_is_graceful():
-    labels = np.full((3, 3), -1, dtype=np.int32)
-    tree = MergeTree(labels, [], [])
+    ws = Watershed(labels=np.full((3, 3), -1, np.int32), basins=[], merges=[], neighborhood="von_neumann",
+                   parents=None, merge_table=np.zeros((0, 5), np.uint32), dtype=np.dtype("float64"), fingerprint=b"")
+    tree = MergeTree(ws)
     assert tree.root is None
     assert dict(tree.nodes) == {}
 
 
 def test_neighbors():
-    labels, basins, merges = _actinide_chain()
-    tree = MergeTree(labels, basins, merges)
+    tree = MergeTree(_actinide_chain())
     assert sorted(tree.neighbors(0)) == [1]        # root: child only
     assert sorted(tree.neighbors(1)) == [0, 2]     # parent + child
     assert sorted(tree.neighbors(2)) == [1]        # leaf: parent only
 
 
 def test_path():
-    labels, basins, merges = _actinide_chain()
-    tree = MergeTree(labels, basins, merges)
+    tree = MergeTree(_actinide_chain())
     assert tree.path(0, 0) == [0]
     assert tree.path(0, 2) == [0, 1, 2]
     assert tree.path(2, 0) == [2, 1, 0]
@@ -86,8 +81,7 @@ def test_path():
 
 
 def test_bfs_hop_order_and_advance():
-    labels, basins, merges = _actinide_chain()
-    tree = MergeTree(labels, basins, merges)
+    tree = MergeTree(_actinide_chain())
     # full bfs from leaf reaches every node, increasing depth
     order = list(tree.bfs(2))
     assert order[0] == (2, 0)
@@ -102,18 +96,19 @@ def test_bfs_hop_order_and_advance():
 
 
 def test_basin_of_point():
-    labels, basins, merges = _actinide_chain()
-    tree = MergeTree(labels, basins, merges)
+    tree = MergeTree(_actinide_chain())
     assert tree.basin_of_point((0, 0)) == 0
     assert tree.basin_of_point((2, 2)) == 1
     assert tree.basin_of_point((4, 4)) == 2
 
 
 def test_basins_containing_groups_points_and_skips_nan():
-    labels, basins, merges = _actinide_chain()
-    labels = labels.copy()
-    labels[0, 4] = -1  # a NaN cell
-    tree = MergeTree(labels, basins, merges)
+    base = _actinide_chain()
+    modified = base.labels.copy()
+    modified[0, 4] = -1  # a NaN cell
+    ws = Watershed(labels=modified, basins=base.basins, merges=base.merges, neighborhood=base.neighborhood,
+                   parents=base.parents, merge_table=base.merge_table, dtype=base.dtype, fingerprint=base.fingerprint)
+    tree = MergeTree(ws)
     grouped = tree.basins_containing([(0, 0), (1, 0), (2, 2), (4, 4), (0, 4)])
     assert sorted(grouped.keys()) == [0, 1, 2]
     assert (0, 0) in grouped[0] and (1, 0) in grouped[0]
@@ -122,8 +117,7 @@ def test_basins_containing_groups_points_and_skips_nan():
 
 
 def test_touches_edge():
-    labels, basins, merges = _actinide_chain()
-    tree = MergeTree(labels, basins, merges)
+    tree = MergeTree(_actinide_chain())
     # basin 2 occupies column 4 == shape[1]-1 (axis-1 max edge)
     assert tree.touches_edge(2, axis=1, side="max") is True
     assert tree.touches_edge(2, axis=1, side="min") is False
@@ -134,3 +128,57 @@ def test_touches_edge():
     assert tree.touches_edge(1, axis=1, side="both") is False
     with pytest.raises(ValueError, match="side must be"):
         tree.touches_edge(0, axis=0, side="bogus")
+
+
+def test_tree_delegates_to_watershed_arrays():
+    ws = _actinide_chain()
+    tree = MergeTree(ws)
+    assert tree.ws is ws
+    assert tree.labels is ws.labels
+    assert tree.parents is None and tree.merge_table is ws.merge_table
+    assert tree.neighborhood == "von_neumann" and tree.dtype == np.dtype("float64")
+    assert tree.fingerprint == ws.fingerprint
+    assert tree.has_labels
+
+
+def test_basin_mask():
+    tree = MergeTree(_actinide_chain())
+    mask = tree.basin_mask(1)
+    assert mask.dtype == bool and mask.shape == (5, 5)
+    assert mask.sum() == 10 and mask[:, 2:4].all()
+
+
+def test_drop_labels_releases_for_every_holder_and_guards_queries():
+    ws = _actinide_chain()
+    tree = MergeTree(ws)
+    tree.drop_labels()
+    assert not tree.has_labels and ws.labels is None and tree.labels is None
+    for call in (
+        lambda: tree.basin_of_point((0, 0)),
+        lambda: tree.basins_containing([(0, 0)]),
+        lambda: tree.touches_edge(0, axis=1),
+        lambda: tree.basin_mask(0),
+    ):
+        with pytest.raises(RuntimeError, match="labels were dropped"):
+            call()
+    # Tree queries keep working.
+    assert tree.path(0, 2) == [0, 1, 2]
+    assert tree.node(2).persistence == pytest.approx(2.0)
+
+
+def test_touches_edge_uses_face_slices_only(monkeypatch):
+    # Guard against regressions to the full-grid `labels == bid` temporary:
+    # np.take must be called on the labels (face) before any comparison.
+    ws = _actinide_chain()
+    tree = MergeTree(ws)
+    calls = []
+    real_take = np.take
+
+    def spy(a, *args, **kwargs):
+        calls.append(a.shape)
+        return real_take(a, *args, **kwargs)
+
+    monkeypatch.setattr(np, "take", spy)
+    assert tree.touches_edge(2, axis=1, side="max") is True
+    # Exactly one take, on the int32 label grid itself — never on a bool temporary.
+    assert calls == [(5, 5)]

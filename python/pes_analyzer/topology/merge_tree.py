@@ -1,8 +1,8 @@
 """Traversable merge tree over watershed basins.
 
-Pure Python on top of ``find_watershed_segmentation``'s ``(labels, basins,
-merges)`` output. One node per basin, rooted at the deepest basin (id 0).
-The tree is physics-free: it knows nothing about ground states or fission.
+Pure Python on top of a :class:`Watershed` from ``find_watershed_segmentation``.
+One node per basin, rooted at the deepest basin (id 0). The tree is
+physics-free: it knows nothing about ground states or fission.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from typing import Callable, Iterator, Optional
 
 import numpy as np
 
+from ._flood import Watershed
 from ._tree import compute_persistence
 
 
@@ -27,25 +28,26 @@ class BasinNode:
 
 
 class MergeTree:
-    """Rooted tree of watershed basins.
+    """Rooted tree of watershed basins over a :class:`Watershed`.
+
+    The tree never copies the grid arrays: ``labels``/``parents``/``merge_table``
+    are properties of the owning ``Watershed``; :meth:`drop_labels` releases
+    them for every holder.
 
     Parameters
     ----------
-    labels : np.ndarray[int32]
-        Basin-id array with the same shape as the PES grid; retained as the
-        public attribute ``self.labels`` for membership and edge queries.
-    basins : sequence of (tuple[int, ...], float)
-        Per-basin ``(minimum_index, minimum_energy)`` pairs as returned by
-        ``find_watershed_segmentation``.
-    merges : sequence of (tuple[int, ...], float, int, int)
-        Saddle-merge records ``(saddle_index, saddle_energy, deeper_id,
-        shallower_id)`` as returned by ``find_watershed_segmentation``.
+    ws : Watershed
+        Output of ``find_watershed_segmentation``. Its ``basins`` and
+        ``merges`` define the nodes and edges; its grid arrays back the
+        membership queries (``basin_of_point``, ``basins_containing``,
+        ``basin_mask``, ``touches_edge``).
     """
 
-    def __init__(self, labels, basins, merges) -> None:
-        self.labels = np.asarray(labels)
-        self._basins = list(basins)
-        self._merges = list(merges)
+    def __init__(self, ws: Watershed) -> None:
+        self.ws = ws
+        self._basins = list(ws.basins)
+        self._merges = list(ws.merges)
+        basins, merges = self._basins, self._merges
 
         persistence = compute_persistence(basins, merges) if basins else np.array([])
 
@@ -68,6 +70,45 @@ class MergeTree:
 
         self.nodes = nodes
         self.root: Optional[int] = 0 if basins else None
+
+    # -- grid arrays (owned by the Watershed) --------------------------------
+
+    @property
+    def labels(self) -> Optional[np.ndarray]:
+        return self.ws.labels
+
+    @property
+    def parents(self) -> Optional[np.ndarray]:
+        return self.ws.parents
+
+    @property
+    def merge_table(self) -> Optional[np.ndarray]:
+        return self.ws.merge_table
+
+    @property
+    def neighborhood(self) -> str:
+        return self.ws.neighborhood
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.ws.dtype
+
+    @property
+    def fingerprint(self) -> bytes:
+        return self.ws.fingerprint
+
+    @property
+    def has_labels(self) -> bool:
+        return self.ws.labels is not None
+
+    def drop_labels(self) -> None:
+        """Release labels, parents and merge_table (4N + 2N bytes) for every holder."""
+        self.ws.drop_labels()
+
+    def _labels(self) -> np.ndarray:
+        if self.ws.labels is None:
+            raise RuntimeError("MergeTree labels were dropped; membership queries are unavailable")
+        return self.ws.labels
 
     # -- node access --------------------------------------------------------
 
@@ -133,32 +174,40 @@ class MergeTree:
 
     def basin_of_point(self, index: tuple[int, ...]) -> int:
         """Return the basin ID at grid cell ``index`` (-1 for a NaN cell)."""
-        return int(self.labels[tuple(index)])
+        return int(self._labels()[tuple(index)])
 
     def basins_containing(
         self, points: list[tuple[int, ...]]
     ) -> dict[int, list[tuple[int, ...]]]:
         """Group index-tuples by the basin each lands in. NaN cells (-1) skipped."""
+        labels = self._labels()
         out: dict[int, list[tuple[int, ...]]] = {}
         for p in points:
-            bid = int(self.labels[tuple(p)])
+            bid = int(labels[tuple(p)])
             if bid < 0:
                 continue
             out.setdefault(bid, []).append(p)
         return out
 
+    def basin_mask(self, bid: int) -> np.ndarray:
+        """Boolean grid, True on the cells of basin ``bid``."""
+        return self._labels() == bid
+
     def touches_edge(self, bid: int, axis: int, side: str = "max") -> bool:
         """True iff any cell of basin ``bid`` lies on the ``axis`` boundary.
 
         ``side`` is ``'min'`` (index 0), ``'max'`` (index shape[axis]-1), or
-        ``'both'``.
+        ``'both'``. Only the boundary face is compared (no full-grid temporary).
         """
-        mask = self.labels == bid
-        last = self.labels.shape[axis] - 1
+        labels = self._labels()
+        last = labels.shape[axis] - 1
         if side == "min":
-            return bool(np.take(mask, 0, axis=axis).any())
+            return bool((np.take(labels, 0, axis=axis) == bid).any())
         if side == "max":
-            return bool(np.take(mask, last, axis=axis).any())
+            return bool((np.take(labels, last, axis=axis) == bid).any())
         if side == "both":
-            return bool(np.take(mask, 0, axis=axis).any() or np.take(mask, last, axis=axis).any())
+            return bool(
+                (np.take(labels, 0, axis=axis) == bid).any()
+                or (np.take(labels, last, axis=axis) == bid).any()
+            )
         raise ValueError("side must be 'min', 'max', or 'both'")
