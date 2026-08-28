@@ -5,9 +5,43 @@
 //! `local_extreme_inner<C>` parameterised by an `is_dominated` closure.
 
 use ndarray::ArrayViewD;
+use rayon::prelude::*;
 
-use crate::common::nd::{compute_strides, full_neighbors, linear_to_index};
+use crate::common::nd::{compute_strides, full_neighbors, linear_to_index, walk_box_neighbors};
 use crate::common::scalar::Scalar;
+
+/// Cells per rayon work item for the find stage.
+const SCAN_CHUNK: usize = 1 << 16;
+
+/// True iff `flat[lin]` has at least one non-NaN neighbour in the box of
+/// half-width `r` and none of them dominates it. Stops at the first
+/// dominating neighbour; no neighbour list is materialised.
+#[inline]
+fn is_extreme_at<T: Scalar, C: Fn(T, T) -> bool>(
+    flat: &[T],
+    lin: usize,
+    e: T,
+    shape: &[usize],
+    strides: &[usize],
+    r: usize,
+    is_dominated: C,
+) -> bool {
+    let mut has_valid_neighbor = false;
+    let mut beats_all = true;
+    walk_box_neighbors(lin, shape, strides, r, |nbr| {
+        let ne = flat[nbr];
+        if ne.is_nan() {
+            return true;
+        }
+        has_valid_neighbor = true;
+        if is_dominated(ne, e) {
+            beats_all = false;
+            return false;
+        }
+        true
+    });
+    has_valid_neighbor && beats_all
+}
 
 /// Sort direction for the finalised output of a single-polarity search.
 enum SortOrder {
@@ -59,7 +93,7 @@ fn local_extreme_inner<T: Scalar, C>(
     is_dominated: C,
 ) -> Vec<(usize, T)>
 where
-    C: Fn(T, T) -> bool + Copy,
+    C: Fn(T, T) -> bool + Copy + Sync,
 {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
@@ -67,39 +101,38 @@ where
         .as_slice()
         .expect("energies must be C-contiguous (enforced upstream)");
 
-    // Stage 1: find candidates at `find_r`.
-    let stencil_max = (2 * find_r + 1).saturating_pow(shape.len() as u32);
-    let mut nbrs: Vec<usize> = Vec::with_capacity(stencil_max);
-    let mut candidates: Vec<(usize, T)> = Vec::new();
-
-    for (lin, &e) in flat.iter().enumerate() {
-        if e.is_nan() {
-            continue;
-        }
-        full_neighbors(lin, &shape, &strides, find_r, &mut nbrs);
-
-        let mut has_valid_neighbor = false;
-        let mut beats_all = true;
-        for &nbr_lin in &nbrs {
-            let ne = flat[nbr_lin];
-            if ne.is_nan() {
-                continue;
+    // Stage 1: parallel over fixed-size chunks; per-chunk vectors are
+    // concatenated in chunk order, so candidates are in ascending linear
+    // index exactly as a sequential scan would produce them.
+    let per_chunk: Vec<Vec<(usize, T)>> = flat
+        .par_chunks(SCAN_CHUNK)
+        .enumerate()
+        .map(|(ci, chunk)| {
+            let base = ci * SCAN_CHUNK;
+            let mut local: Vec<(usize, T)> = Vec::new();
+            for (j, &e) in chunk.iter().enumerate() {
+                if e.is_nan() {
+                    continue;
+                }
+                let lin = base + j;
+                if is_extreme_at(flat, lin, e, &shape, &strides, find_r, is_dominated) {
+                    local.push((lin, e));
+                }
             }
-            has_valid_neighbor = true;
-            if is_dominated(ne, e) {
-                beats_all = false;
-                break;
-            }
-        }
-
-        if has_valid_neighbor && beats_all {
-            candidates.push((lin, e));
-        }
+            local
+        })
+        .collect();
+    // Move-extend: no element is cloned and each per-chunk vector is freed as
+    // soon as it is consumed. Candidates are a tiny fraction of V on any real
+    // PES (a fully flat grid is degenerate for a strict-minimum search).
+    let total: usize = per_chunk.iter().map(Vec::len).sum();
+    let mut candidates: Vec<(usize, T)> = Vec::with_capacity(total);
+    for chunk in per_chunk {
+        candidates.extend(chunk);
     }
 
-    // Stage 2: confirm against the wider `confirm_r` stencil if requested
-    // AND strictly wider than `find_r`. The equal case is a no-op and
-    // skipping it avoids redundant work.
+    // Stage 2 unchanged: confirm against the wider stencil (few candidates)
+    // if requested AND strictly wider than `find_r`; the equal case is a no-op.
     match confirm_r {
         Some(r) if r > find_r => {
             let stencil_max_r = (2 * r + 1).saturating_pow(shape.len() as u32);
@@ -629,5 +662,49 @@ mod tests {
         let i32s: Vec<Vec<usize>> = r32.into_iter().map(|(idx, _)| idx).collect();
         assert_eq!(i64s, i32s);
         assert!(!i64s.is_empty(), "fixture should yield at least one minimum");
+    }
+
+    /// Sequential reference using the materialised stencil (the 0.9.0 loop).
+    fn reference_minima(arr: &ArrayD<f64>, r: usize) -> Vec<(usize, f64)> {
+        let shape = arr.shape().to_vec();
+        let strides = compute_strides(&shape);
+        let flat = arr.as_slice().unwrap();
+        let mut nbrs = Vec::new();
+        let mut out = Vec::new();
+        for (lin, &e) in flat.iter().enumerate() {
+            if e.is_nan() { continue; }
+            crate::common::nd::full_neighbors(lin, &shape, &strides, r, &mut nbrs);
+            let mut has_valid = false;
+            let mut beats_all = true;
+            for &n in &nbrs {
+                let ne = flat[n];
+                if ne.is_nan() { continue; }
+                has_valid = true;
+                if ne < e { beats_all = false; break; }
+            }
+            if has_valid && beats_all { out.push((lin, e)); }
+        }
+        out
+    }
+
+    #[test]
+    fn parallel_lazy_scan_matches_sequential_reference_on_random_5d_with_nans() {
+        let shape = [9usize, 8, 7, 6, 5];
+        let total: usize = shape.iter().product();
+        let mut x: u64 = 0x2545F4914F6CDD1D;
+        let data: Vec<f64> = (0..total)
+            .map(|i| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                if i % 13 == 0 { f64::NAN } else { ((x >> 11) as f64) / ((1u64 << 53) as f64) }
+            })
+            .collect();
+        let arr = Array::from_shape_vec(IxDyn(&shape), data).unwrap();
+        for r in 1..=2 {
+            let expected = reference_minima(&arr, r);
+            let got = local_extreme_inner(arr.view(), r, None, |ne, e| ne < e);
+            assert_eq!(got, expected, "r={r}");
+            // Candidate order is ascending linear index regardless of chunking.
+            assert!(got.windows(2).all(|w| w[0].0 < w[1].0));
+        }
     }
 }
