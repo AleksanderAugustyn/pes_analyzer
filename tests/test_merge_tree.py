@@ -175,10 +175,11 @@ def test_touches_edge_uses_face_slices_only(monkeypatch):
     real_take = np.take
 
     def spy(a, *args, **kwargs):
-        calls.append(a.shape)
+        calls.append((a.shape, a.dtype, a is ws.labels))
         return real_take(a, *args, **kwargs)
 
     monkeypatch.setattr(np, "take", spy)
     assert tree.touches_edge(2, axis=1, side="max") is True
-    # Exactly one take, on the int32 label grid itself — never on a bool temporary.
-    assert calls == [(5, 5)]
+    # Exactly one take, on the int32 label grid object itself — a `labels == bid`
+    # temporary would show up here as a bool array that is not ws.labels.
+    assert calls == [((5, 5), np.dtype(np.int32), True)]

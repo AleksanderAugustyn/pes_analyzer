@@ -103,14 +103,16 @@ def find_minimum_energy_path(
     (``neighborhood`` defaults to ``"von_neumann"``). With ``tree`` (a
     ``MergeTree`` or ``Watershed`` built with ``parents=True`` from the same
     grid) the path is reconstructed from the recorded flood state: no re-flood,
-    O(path) memory, and the neighbourhood is the tree's.
+    no grid-sized allocation (O(path + basins + merges) words), and the
+    neighbourhood is the tree's. Out-of-range or negative ``start``/``end``
+    raise ``IndexError`` in both modes, as everywhere in the package.
     """
     energies = np.asarray(energies)
     start = tuple(int(i) for i in start)
     end = tuple(int(i) for i in end)
     if tree is None:
         return _native_topology.find_minimum_energy_path(
-            energies, start, end, neighborhood or "von_neumann"
+            energies, start, end, "von_neumann" if neighborhood is None else neighborhood
         )
     ws = getattr(tree, "ws", tree)
     if ws.labels is None or ws.merge_table is None:

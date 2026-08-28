@@ -143,3 +143,24 @@ def test_mep_with_tree_rejects_corrupt_arrays_without_crashing():
     ws.merge_table = ws.merge_table[:, :4].copy()           # wrong width -> ValueError
     with pytest.raises(ValueError, match=r"\(M, 5\)"):
         find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), tree=ws)
+
+
+def test_mep_rejects_empty_neighborhood_in_both_modes():
+    e = _random_grid()
+    with pytest.raises(ValueError, match="neighborhood"):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), neighborhood="")
+    tree = MergeTree(find_watershed_segmentation(e, parents=True))
+    with pytest.raises(ValueError, match="neighborhood"):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), neighborhood="", tree=tree)
+
+
+def test_mep_endpoint_errors_match_standalone_mode():
+    # Endpoint validation goes through common::validate in both modes:
+    # IndexError for out-of-range / negative, ValueError for a wrong length.
+    e = _random_grid()
+    tree = MergeTree(find_watershed_segmentation(e, parents=True))
+    for bad, exc in [((9, 0, 0), IndexError), ((-1, 0, 0), IndexError), ((0, 0), ValueError)]:
+        with pytest.raises(exc):
+            find_minimum_energy_path(e, bad, (5, 6, 4))
+        with pytest.raises(exc):
+            find_minimum_energy_path(e, bad, (5, 6, 4), tree=tree)

@@ -101,7 +101,8 @@ def find_iwf_grid(
 
 ### Raises
 
-- `ValueError` if `energies` is not C-contiguous, if `start`/`end` have the wrong length, if any index is out of bounds, if either endpoint cell is `NaN`, or if `neighborhood` is not `"von_neumann"`/`"moore"`.
+- `ValueError` if `energies` is not C-contiguous, if `start`/`end` have the wrong length, if either endpoint cell is `NaN`, or if `neighborhood` is not `"von_neumann"`/`"moore"`.
+- `IndexError` if any `start`/`end` index is out of bounds or negative.
 
 ### What it does
 
@@ -378,10 +379,11 @@ Runs the imaginary-water-flow flood to completion (not just until two specified 
 import numpy as np
 from pes_analyzer.topology import find_watershed_segmentation
 
+# Two corner minima joined by a ridge row whose saddle is (2, 2) = 4.
 energies = np.full((5, 5), 10.0)
-energies[0, 0] = 0.0
-energies[4, 4] = 0.0
-energies[2, :] = [3.0, 3.0, 4.0, 3.0, 3.0]   # bridge with saddle at (2, 2) = 4
+energies[0, 0], energies[0, 1], energies[1, 0], energies[1, 1] = 0.0, 1.0, 1.0, 2.0
+energies[2, :] = [3.0, 3.0, 4.0, 3.0, 3.0]
+energies[4, 4], energies[3, 4], energies[4, 3], energies[3, 3] = 0.0, 1.0, 1.0, 2.0
 
 ws = find_watershed_segmentation(energies)
 print(ws.basins)
@@ -389,7 +391,7 @@ print(ws.basins)
 print(ws.merges)
 # [((2, 2), 4.0, 0, 1)]
 print(ws.labels[2, 2], ws.merge_table)
-# 1 [[12 13  0  1  1]]                  # saddle cell 12 adopted basin 1 first, met basin 0 via cell 13
+# 0 [[12 13  0  1  0]]                  # saddle cell 12 adopted basin 0 first, met basin 1 via cell 13
 ```
 
 ### Notes
@@ -421,7 +423,7 @@ def find_minimum_energy_path(
 - **`start`** — N-tuple of `int` grid indices. Must reference a non-`NaN` cell.
 - **`end`** — N-tuple of `int` grid indices. Must reference a non-`NaN` cell.
 - **`neighborhood`** — `"von_neumann"` (2N axis neighbors) or `"moore"` (3ᴺ−1 Chebyshev r=1 neighbors). Standalone mode defaults to `"von_neumann"`. With `tree=`, the neighbourhood is the tree's; an explicit value must match it.
-- **`tree`** — a `MergeTree` or `Watershed` built with `parents=True` from the same grid. The path is then reconstructed from the recorded flood state: no re-flood, O(path) memory.
+- **`tree`** — a `MergeTree` or `Watershed` built with `parents=True` from the same grid. The path is then reconstructed from the recorded flood state: no re-flood and no grid-sized allocation (O(path + basins + merges) words).
 
 ### Returns
 
@@ -433,7 +435,8 @@ def find_minimum_energy_path(
 
 ### Raises
 
-- `ValueError` if `energies` is not C-contiguous, if `start`/`end` have the wrong length, if any index is out of bounds, if either endpoint cell is `NaN`, or if `neighborhood` is not `"von_neumann"`/`"moore"`.
+- `ValueError` if `energies` is not C-contiguous, if `start`/`end` have the wrong length, if either endpoint cell is `NaN`, or if `neighborhood` is not `"von_neumann"`/`"moore"`.
+- `IndexError` if any `start`/`end` index is out of bounds or negative (same as `find_iwf_grid`, in both modes).
 - With `tree=`, additionally `ValueError` when:
   - the tree's grid arrays were released (`"labels were dropped"`);
   - it was built without `parents=True`;
@@ -581,7 +584,7 @@ the end-to-end pipeline these primitives plug into.
 |---|---|---|
 | `ValueError: energies must be C-contiguous` | passed a slice or transposed array | `np.ascontiguousarray(arr)` before calling |
 | `ValueError: ndim must be in [2, 7]` | wrong array shape | reshape or filter inactive axes |
-| `ValueError: index ... out of bounds for shape ...` | `start`/`end` outside the grid | check tuple length and values |
+| `IndexError: index ... out of bounds for axis ...` / `negative index ... is not allowed` | `start`/`end` outside the grid | check the index values (a wrong tuple *length* is a `ValueError`) |
 | `ValueError: energy at \`start\` is NaN` | endpoint cell is masked | pick an endpoint inside the non-`NaN` region |
 | `ValueError: tree was built without parents=True` | `find_minimum_energy_path(tree=)` on a watershed without flood parents | rebuild with `find_watershed_segmentation(energies, parents=True)` |
 | `ValueError: tree was built from a different energy grid` | `tree=` with an array of different dtype/values | pass the exact array the watershed was built from |
