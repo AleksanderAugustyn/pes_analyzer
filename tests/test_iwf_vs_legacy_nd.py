@@ -9,8 +9,11 @@ MapMaker uses).
 from pathlib import Path
 
 import numpy as np
-import polars as pl
 import pytest
+
+# polars is only needed by this data-gated test, not by the package; skip the
+# whole module when it is absent (e.g. the clean-venv checks in CI).
+pl = pytest.importorskip("polars")
 
 from pes_analyzer.grid   import build_dense
 from pes_analyzer.saddle import find_iwf_grid
