@@ -1,0 +1,86 @@
+name: wheels
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that the tag matches Cargo.toml and pyproject.toml
+        # `version` is duplicated by hand (Cargo.toml is the source of truth);
+        # a tag that disagrees with either would publish the wrong number.
+        run: |
+          tag='${{ github.ref_name }}'
+          cargo_v=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          py_v=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          echo "tag=$tag Cargo.toml=$cargo_v pyproject.toml=$py_v"
+          [ "$tag" = "$cargo_v" ] && [ "$tag" = "$py_v" ]
+      - name: Build manylinux2014 x86_64 wheel (abi3, Python >= 3.10)
+        # Runs inside the manylinux2014 container with a current stable Rust
+        # (edition 2024 needs >= 1.85); one abi3 wheel serves every Python >= 3.10.
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          manylinux: '2014'
+          args: --release --out wheelhouse
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist_sdist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify sdist installs from the tarball
+        # Guards an unbuildable sdist: the tarball must compile with a stock
+        # host toolchain (cargo + maturin via the build backend).
+        run: |
+          python -m venv /tmp/verify-sdist
+          /tmp/verify-sdist/bin/pip install dist_sdist/*.tar.gz pytest numpy
+          /tmp/verify-sdist/bin/python -m pytest tests -q
+      - name: Verify wheel in clean venv
+        run: |
+          python -m venv /tmp/verify-wheel
+          /tmp/verify-wheel/bin/pip install wheelhouse/*.whl pytest numpy
+          /tmp/verify-wheel/bin/python -m pytest tests -q
+      - name: Collect dist
+        run: |
+          mkdir dist
+          cp wheelhouse/*.whl dist_sdist/*.tar.gz dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write        # create/upload the Release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+  pypi:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pes-analyzer
+    permissions:
+      id-token: write        # PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
