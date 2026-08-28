@@ -8,6 +8,7 @@ This is the canonical contract for the three public functions of `pes_analyzer`.
 - N-D indices are `tuple[int, ...]` in `numpy` axis order.
 - `NaN` cells are treated as masked. They are impassable for saddle search and excluded from minimum search.
 - Supported dimensionality: N ∈ [2, 7]. The Rust kernels enforce this at the boundary.
+- Threading: the `find_minima_grid` / `find_maxima_grid` / `find_extrema_grid` scans and the flood sort run on the rayon global pool (all cores by default; set `RAYON_NUM_THREADS` to limit). Results never depend on the thread count. Run one analysis per process at a time — concurrent floods in one process each retain their grid arrays and share the pool.
 
 ---
 
@@ -322,31 +323,44 @@ print(maxs)  # plateau of 2.0s around the rim
 ## `find_watershed_segmentation`
 
 ```python
-from pes_analyzer.topology import find_watershed_segmentation
+from pes_analyzer.topology import Watershed, find_watershed_segmentation
 
 def find_watershed_segmentation(
-    energies: numpy.ndarray[float64],
+    energies: numpy.ndarray[float32 | float64],
     neighborhood: str = "von_neumann",
-) -> tuple[
-    numpy.ndarray[int32],                              # labels
-    list[tuple[tuple[int, ...], float]],               # basins
-    list[tuple[tuple[int, ...], float, int, int]],     # merges
-]:
+    *,
+    parents: bool = False,
+) -> Watershed:
     ...
 ```
 
 ### Parameters
 
-- **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are masked.
+- **`energies`** — C-contiguous `float32` or `float64` array of ndim N ∈ [2, 7]. `NaN` cells are masked.
 - **`neighborhood`** — `"von_neumann"` (2N axis neighbors, default) or `"moore"` (3ᴺ−1 Chebyshev r=1 neighbors). See `ALGORITHMS.md` § Neighborhood stencils.
+- **`parents`** — also record each cell's flood parent as a direction code (`Watershed.parents`, 2N bytes). Required by `find_minimum_energy_path(..., tree=)`.
 
 ### Returns
 
-A 3-tuple `(labels, basins, merges)`:
+A `Watershed` dataclass — the single owner of the grid-sized arrays:
 
-- **`labels`** — `int32` array with shape == `energies.shape`. `labels[cell] == -1` iff `energies[cell]` is NaN, otherwise the basin ID the cell first joined during the flood.
-- **`basins`** — `list[tuple[tuple[int, ...], float]]`, one entry per basin. `(min_nd_index, min_energy)`, sorted ascending by energy. `basins[0]` always contains the global minimum cell.
-- **`merges`** — `list[tuple[tuple[int, ...], float, int, int]]`, one entry per union that merged two distinct basins. `(saddle_nd_index, saddle_energy, deeper_basin_id, shallower_basin_id)`, sorted ascending by saddle energy. The convention `basins[deeper].min_e <= basins[shallower].min_e` always holds.
+| Field | Type | Size | Meaning |
+|---|---|---|---|
+| `labels` | `int32` ndarray, shape == `energies.shape`, read-only | 4N B | `-1` iff the cell is `NaN`, otherwise the basin ID the cell first joined during the flood |
+| `basins` | `list[tuple[tuple[int, ...], float]]` | — | `(min_nd_index, min_energy)` per basin, ascending by energy; `basins[0]` holds the global minimum |
+| `merges` | `list[tuple[tuple[int, ...], float, int, int]]` | — | `(saddle_nd_index, saddle_energy, deeper_id, shallower_id)` per union of two distinct basins, ascending by saddle energy; `basins[deeper].min_e <= basins[shallower].min_e` always holds |
+| `neighborhood` | `str` | — | the stencil the flood used |
+| `parents` | `uint16` ndarray or `None`, read-only | 2N B | flood-parent direction code per cell (`65535` at seeds and `NaN` cells); `None` unless `parents=True` |
+| `merge_table` | `uint32` ndarray `(M, 5)`, read-only | 20M B | per merge `saddle_lin, other_lin, deeper, shallower, saddle_side` — linear cell indices of the saddle and of its already-flooded neighbour on the other component, the basin ids, and the basin the saddle cell itself belongs to |
+| `dtype` | `numpy.dtype` | — | dtype of `energies` |
+| `fingerprint` | `bytes` (16) | — | `energy_fingerprint(energies)`, used by `find_minimum_energy_path(tree=)` to reject a different grid |
+
+Plus:
+
+- **`has_labels`** — `True` while the grid arrays are held.
+- **`drop_labels()`** — sets `labels`, `parents` and `merge_table` to `None`, freeing 4N + 2N bytes for every holder at once (a `MergeTree` built on the object sees the same `None`). `basins` and `merges` survive, so tree queries keep working.
+
+`energy_fingerprint(energies) -> bytes` is exported as well: a 16-byte blake2b over the shape, the dtype and every k-th cell with k = max(1, size // 2²⁰). It distinguishes grids, not bit-exact copies.
 
 ### Raises
 
@@ -354,7 +368,9 @@ A 3-tuple `(labels, basins, merges)`:
 
 ### What it does
 
-Runs the imaginary-water-flow flood to completion (not just until two specified endpoints connect). Records every union that merges two previously-disconnected basins as a `(saddle, deeper, shallower)` event. This is the full segmentation that `find_iwf_grid` partially computes — `find_iwf_grid` is the two-point specialization that stops at the first basin-merge between its two endpoint cells.
+Runs the imaginary-water-flow flood to completion (not just until two specified endpoints connect). Records every union that merges two previously-disconnected basins as a merge event. This is the full segmentation that `find_iwf_grid` partially computes — `find_iwf_grid` is the two-point specialization that stops at the first basin-merge between its two endpoint cells.
+
+**Tie contract.** Cells are flooded in ascending energy; equal energies in ascending C-order linear index. Basin ids are assigned in that order, so at every merge the lower id is `deeper` (ties resolve to the lower seed index) and basin 0 is always the root of the merge tree.
 
 ### Example
 
@@ -367,12 +383,19 @@ energies[0, 0] = 0.0
 energies[4, 4] = 0.0
 energies[2, :] = [3.0, 3.0, 4.0, 3.0, 3.0]   # bridge with saddle at (2, 2) = 4
 
-labels, basins, merges = find_watershed_segmentation(energies)
-print(basins)
-# [((0, 0), 0.0), ((4, 4), 0.0)]
-print(merges)
-# [((2, 2), 4.0, 0, 1)]   # or (..., 1, 0) — both basins have min_e == 0.0
+ws = find_watershed_segmentation(energies)
+print(ws.basins)
+# [((0, 0), 0.0), ((4, 4), 0.0)]       # tie: lower linear index first
+print(ws.merges)
+# [((2, 2), 4.0, 0, 1)]
+print(ws.labels[2, 2], ws.merge_table)
+# 1 [[12 13  0  1  1]]                  # saddle cell 12 adopted basin 1 first, met basin 0 via cell 13
 ```
+
+### Notes
+
+- **Memory.** Peak inside the call is 8N + 4V bytes (10N + 4V with `parents=True`; N = cells, V = non-`NaN` cells) plus a sort transient of 12V for `float32` / 20V for `float64` (the `(f64, u32)` pair is padded to 16 bytes) that is released before the flood loop starts. The returned arrays (4N labels, 2N parents) stay resident until `drop_labels()`.
+- **Threading.** The sort uses the rayon pool (`RAYON_NUM_THREADS`); results do not depend on the thread count.
 
 ---
 
@@ -382,20 +405,23 @@ print(merges)
 from pes_analyzer.topology import find_minimum_energy_path
 
 def find_minimum_energy_path(
-    energies: numpy.ndarray[float64],
+    energies: numpy.ndarray[float32 | float64],
     start: tuple[int, ...],
     end: tuple[int, ...],
-    neighborhood: str = "von_neumann",
+    neighborhood: str | None = None,
+    *,
+    tree: MergeTree | Watershed | None = None,
 ) -> tuple[numpy.ndarray[int64], numpy.ndarray[float64]] | None:
     ...
 ```
 
 ### Parameters
 
-- **`energies`** — C-contiguous `float64` array of ndim N ∈ [2, 7]. `NaN` cells are treated as walls.
+- **`energies`** — C-contiguous `float32` or `float64` array of ndim N ∈ [2, 7]. `NaN` cells are treated as walls.
 - **`start`** — N-tuple of `int` grid indices. Must reference a non-`NaN` cell.
 - **`end`** — N-tuple of `int` grid indices. Must reference a non-`NaN` cell.
-- **`neighborhood`** — `"von_neumann"` (2N axis neighbors, default) or `"moore"` (3ᴺ−1 Chebyshev r=1 neighbors). See `ALGORITHMS.md` § Neighborhood stencils.
+- **`neighborhood`** — `"von_neumann"` (2N axis neighbors) or `"moore"` (3ᴺ−1 Chebyshev r=1 neighbors). Standalone mode defaults to `"von_neumann"`. With `tree=`, the neighbourhood is the tree's; an explicit value must match it.
+- **`tree`** — a `MergeTree` or `Watershed` built with `parents=True` from the same grid. The path is then reconstructed from the recorded flood state: no re-flood, O(path) memory.
 
 ### Returns
 
@@ -408,16 +434,26 @@ def find_minimum_energy_path(
 ### Raises
 
 - `ValueError` if `energies` is not C-contiguous, if `start`/`end` have the wrong length, if any index is out of bounds, if either endpoint cell is `NaN`, or if `neighborhood` is not `"von_neumann"`/`"moore"`.
+- With `tree=`, additionally `ValueError` when:
+  - the tree's grid arrays were released (`"labels were dropped"`);
+  - it was built without `parents=True`;
+  - `neighborhood` is given and differs from `tree.neighborhood`;
+  - `tree.labels.shape != energies.shape`;
+  - `energies` has a different dtype or fingerprint from the tree's grid (`"different energy grid"`);
+  - the tree arrays have the wrong dtype or shape (`labels` must be `int32`, `parents` `uint16` with the shape of `labels`, `merge_table` `uint32` of shape `(M, 5)`);
+  - the arrays are internally inconsistent (basin ids out of range, invalid or grid-leaving direction codes, cyclic parent chains, merges that contradict earlier ones).
 
 ### What it does
 
-Computes the *deep minimax path*: among all grid paths from `start` to `end` it minimizes the highest energy crossed (so it passes through the exact saddles `find_iwf_grid` reports), and between saddles it descends to the actual basin minimum cells. The profile's local maxima are therefore true inter-basin saddles and its local minima are true basin minima — feed `path_energies` to `analyze_path_profile` to extract them. See `ALGORITHMS.md` (`find_minimum_energy_path`) for the algorithm.
+Computes the *deep minimax path*: among all grid paths from `start` to `end` it minimizes the highest energy crossed (so it passes through the exact saddles `find_iwf_grid` reports), and between saddles it descends to the actual basin minimum cells. The profile's local maxima are therefore true inter-basin saddles and its local minima are true basin minima — feed `path_energies` to `analyze_path_profile` to extract them.
+
+**Standalone mode** (`tree=None`) floods with the same kernel as `find_watershed_segmentation`, recording parents and stopping as soon as `start` and `end` connect, then reconstructs the path from that partial flood; it costs 10N + 4V bytes plus the sort transient. **Tree mode** skips the flood entirely: the Kruskal forest is rebuilt from `merge_table` and the descents follow `parents`. For the same grid and neighbourhood both modes return the identical path. See `ALGORITHMS.md` (`find_minimum_energy_path`).
 
 ### Example
 
 ```python
 import numpy as np
-from pes_analyzer.topology import find_minimum_energy_path, analyze_path_profile
+from pes_analyzer.topology import MergeTree, analyze_path_profile, find_minimum_energy_path, find_watershed_segmentation
 
 energies = np.array([[0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0]])
 idx, prof = find_minimum_energy_path(energies, (0, 0), (0, 8))
@@ -425,13 +461,18 @@ print(idx[:, 1])
 # [0 1 2 3 4 5 6 7 8]
 print(analyze_path_profile(prof))
 # PathProfile(minima=[(0, 0.0), (4, 1.0), (8, 2.0)], saddles=[(2, 5.0), (6, 6.0)])
+
+tree = MergeTree(find_watershed_segmentation(energies, parents=True))
+idx2, prof2 = find_minimum_energy_path(energies, (0, 0), (0, 8), tree=tree)   # same path, no re-flood
+assert (idx2 == idx).all()
 ```
 
 ### Notes and edge cases
 
 - The path can be long: it dips to every basin minimum between barriers (a single descent chain on a 5-D map can be hundreds of steps). K is still tiny next to the grid size.
 - The path is a walk, not necessarily a simple path: connecting two cells of one basin descends both to the basin minimum, which may re-walk a shared chain suffix.
-- For the same `neighborhood`, `max(path_energies)` equals the `find_iwf_grid` saddle energy between the same endpoints exactly (both kernels flood in the same order).
+- For the same `neighborhood`, `max(path_energies)` equals the `find_iwf_grid` saddle energy between the same endpoints (the minimax value is unique; with tied energies the saddle *cell* may differ).
+- Tree mode validates the whole `labels` array (O(N), a fraction of a second at 10⁸ cells) before walking; the walk itself is O(K).
 
 ---
 
@@ -453,18 +494,25 @@ Per-basin topological persistence. The deepest basin (`basins[0]`) has persisten
 
 Drops basins whose persistence is strictly less than `threshold`. Returns `(surviving_basin_ids, kept_merges)`. `kept_merges` is the subset of input merges whose `shallower` basin survives; the `deeper` basin always survives too (proof: if a kept merge has `shallower.persistence >= threshold` and `deeper.min_e <= shallower.min_e`, then `deeper.persistence >= shallower.persistence >= threshold`).
 
-### `MergeTree(labels, basins, merges)`
+### `MergeTree(ws)`
 
-Traversable rooted tree over the watershed basins, built directly from the
-`(labels, basins, merges)` triple returned by `find_watershed_segmentation`. One
-node per basin, rooted at the deepest basin (`basins[0]`, id 0). The tree is
-**physics-free**: it knows nothing about ground states, fission, or any domain
-convention — it exposes neutral traversal, membership, and geometry primitives
-that a consumer composes with its own predicates.
+Traversable rooted tree over the watershed basins, built from the `Watershed`
+returned by `find_watershed_segmentation`. One node per basin, rooted at the
+deepest basin (`basins[0]`, id 0). The tree is **physics-free**: it knows
+nothing about ground states, fission, or any domain convention — it exposes
+neutral traversal, membership, and geometry primitives that a consumer composes
+with its own predicates.
 
-Public attributes:
+The tree never copies the grid arrays: `labels`, `parents` and `merge_table`
+are read-through properties of the owning `Watershed`, so `drop_labels()` on
+either object releases them for both.
 
-- **`labels`** — the `int32` basin-id array (same shape as the PES grid), kept for membership and edge queries.
+Public attributes and properties:
+
+- **`ws`** — the owning `Watershed`.
+- **`labels`**, **`parents`**, **`merge_table`** — the `Watershed` arrays (`None` after `drop_labels()`).
+- **`neighborhood`**, **`dtype`**, **`fingerprint`** — forwarded from the `Watershed`.
+- **`has_labels`** — `False` after `drop_labels()`.
 - **`nodes`** — `dict[int, BasinNode]` keyed by basin ID.
 - **`root`** — `int | None`; basin id 0 (the global minimum) when any basin exists, else `None`.
 
@@ -477,9 +525,11 @@ Methods:
 | `neighbors(bid)` | children + parent basin IDs |
 | `path(a, b)` | inclusive tree path from `a` to `b` (through their lowest common ancestor) |
 | `bfs(start, *, advance=None)` | iterator of `(basin_id, depth)`; `advance(from_bid, to_bid) -> bool` gates edge traversal — return `False` to skip that edge and the subtree beyond it |
+| `drop_labels()` | release `labels`, `parents`, `merge_table` (4N + 2N bytes) for every holder of the `Watershed`; tree queries keep working, the four membership queries below then raise `RuntimeError("MergeTree labels were dropped ...")` |
 | `basin_of_point(index)` | basin ID at grid cell `index` (`-1` for a `NaN` cell) |
 | `basins_containing(points)` | `dict[basin_id, list[index]]` grouping the points by basin (`NaN` cells skipped) |
-| `touches_edge(bid, axis, side='max')` | `True` iff any cell of `bid` lies on the `axis` boundary; `side` is `'min'`, `'max'`, or `'both'` |
+| `basin_mask(bid)` | boolean grid, `True` on the cells of basin `bid` |
+| `touches_edge(bid, axis, side='max')` | `True` iff any cell of `bid` lies on the `axis` boundary; `side` is `'min'`, `'max'`, or `'both'`. Only the boundary face is compared — no full-grid temporary |
 
 ### `BasinNode`
 
@@ -503,15 +553,17 @@ from pes_analyzer.topology import find_watershed_segmentation, MergeTree
 
 # Three basins along a row: minima at columns 0, 4, 8.
 energies = np.array([[0.0, 3.0, 8.0, 4.0, 1.0, 3.0, 5.0, 4.0, 2.0]])
-labels, basins, merges = find_watershed_segmentation(energies)
+ws = find_watershed_segmentation(energies)
 
-tree = MergeTree(labels, basins, merges)
+tree = MergeTree(ws)
 print(tree.root)                          # 0 (deepest basin)
 print(tree.node(0).children)              # [1]
 print(tree.node(2).saddle_to_parent)      # ((0, 6), 5.0)
 print(tree.persistence(1))                # 7.0
 print(tree.path(1, 2))                    # [1, 2]
 print(tree.basin_of_point((0, 4)))        # 1
+tree.drop_labels()                         # frees ws.labels for both holders
+print(tree.path(1, 2))                    # [1, 2]  — tree queries still work
 ```
 
 The deleted `identify_critical_points` helper (a domain-specific labeller for
@@ -531,6 +583,9 @@ the end-to-end pipeline these primitives plug into.
 | `ValueError: ndim must be in [2, 7]` | wrong array shape | reshape or filter inactive axes |
 | `ValueError: index ... out of bounds for shape ...` | `start`/`end` outside the grid | check tuple length and values |
 | `ValueError: energy at \`start\` is NaN` | endpoint cell is masked | pick an endpoint inside the non-`NaN` region |
+| `ValueError: tree was built without parents=True` | `find_minimum_energy_path(tree=)` on a watershed without flood parents | rebuild with `find_watershed_segmentation(energies, parents=True)` |
+| `ValueError: tree was built from a different energy grid` | `tree=` with an array of different dtype/values | pass the exact array the watershed was built from |
+| `RuntimeError: MergeTree labels were dropped` | membership query after `drop_labels()` | query before dropping, or rebuild the watershed |
 | `ValueError: neighborhood_range must be in [1, 5]` | passed `0` or `> 5` | choose `neighborhood_range ∈ {1, 2, 3, 4, 5}` |
 | `ValueError: confirm_range must be in [1, 5]` | passed `0` or `> 5` | choose `confirm_range ∈ {1, 2, 3, 4, 5}` or `None` |
 | `ValueError: confirm_range (c) must be >= neighborhood_range (n)` | `confirm_range < neighborhood_range` | raise `confirm_range` or lower `neighborhood_range` (most callers want `neighborhood_range=1, confirm_range=R`) |

@@ -14,8 +14,9 @@ Quantum-chemistry calculations produce potential energy surfaces (PES) as dense 
 - **`pes_analyzer.extrema.find_minima_grid`** — local minima on the Chebyshev king-move stencil (default 3ᴺ−1; widen via `confirm_range` for a fast two-pass check, or via `neighborhood_range` for a direct wider check).
 - **`pes_analyzer.extrema.find_maxima_grid`** — strict dual of `find_minima_grid`. Same stencil and same `neighborhood_range` / `confirm_range` semantics; output sorted descending by energy.
 - **`pes_analyzer.extrema.find_extrema_grid`** — combined single-sweep search. Returns `(minima, maxima)` byte-identical to calling the two single-polarity functions separately, at the cost of one extra-list allocation but one fewer stencil walk per cell.
-- **`pes_analyzer.topology.find_watershed_segmentation`** — full watershed flood: labels every cell by basin and records every basin-merge (saddle) event as a merge tree. The whole-surface generalization of `find_iwf_grid`.
-- **`pes_analyzer.topology`** merge-tree helpers — pure-Python `compute_persistence`, `prune_merge_tree`, and the traversable `MergeTree` (whose nodes are `BasinNode`s) analyse that merge tree. `MergeTree` is physics-free: it exposes neutral traversal, membership, and geometry primitives that a consumer composes with its own predicates to label ground states, saddles, fission exits, etc.
+- **`pes_analyzer.topology.find_watershed_segmentation`** — full watershed flood returning a `Watershed`: basin labels, the merge (saddle) events, and optionally each cell's flood parent (`parents=True`). Peak memory 8N + 4V bytes; `drop_labels()` releases the grid arrays.
+- **`pes_analyzer.topology.find_minimum_energy_path`** — deep minimax path between two cells; with `tree=` it is reconstructed from the watershed's flood state instead of re-flooding.
+- **`pes_analyzer.topology`** merge-tree helpers — pure-Python `compute_persistence`, `prune_merge_tree`, and the traversable `MergeTree(ws)` (whose nodes are `BasinNode`s) analyse that merge tree. `MergeTree` is physics-free: it exposes neutral traversal, membership, and geometry primitives that a consumer composes with its own predicates to label ground states, saddles, fission exits, etc.
 - **`pes_analyzer.grid.build_dense`** — scatter helper that turns sparse `(coords, value)` rows into a dense `numpy` array indexed in axis order.
 
 ## Installation
@@ -61,10 +62,11 @@ print(find_iwf_grid(energies, start=(0, 0), end=(0, 4)))
 | `extrema.find_minima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local minima (Chebyshev stencil) | [API.md](./python/pes_analyzer/_docs/API.md#find_minima_grid) |
 | `extrema.find_maxima_grid(energies, *, neighborhood_range=1, confirm_range=None)` | local maxima (dual of `find_minima_grid`) | [API.md](./python/pes_analyzer/_docs/API.md#find_maxima_grid) |
 | `extrema.find_extrema_grid(energies, *, neighborhood_range=1, confirm_range=None)` | combined single-sweep search | [API.md](./python/pes_analyzer/_docs/API.md#find_extrema_grid) |
-| `topology.find_watershed_segmentation(energies)` | full basin labelling + merge tree | [API.md](./python/pes_analyzer/_docs/API.md#find_watershed_segmentation) |
+| `topology.find_watershed_segmentation(energies, neighborhood="von_neumann", *, parents=False)` | full basin labelling + merge tree (`Watershed`) | [API.md](./python/pes_analyzer/_docs/API.md#find_watershed_segmentation) |
+| `topology.find_minimum_energy_path(energies, start, end, tree=tree)` | deep minimax path from the watershed's flood state | [API.md](./python/pes_analyzer/_docs/API.md#find_minimum_energy_path) |
 | `topology.compute_persistence(basins, merges)` | per-basin topological persistence | [API.md](./python/pes_analyzer/_docs/API.md#topology-helpers) |
 | `topology.prune_merge_tree(basins, merges, threshold)` | drop low-persistence basins | [API.md](./python/pes_analyzer/_docs/API.md#topology-helpers) |
-| `topology.MergeTree(labels, basins, merges)` | traversable basin merge tree (physics-free primitives) | [API.md](./python/pes_analyzer/_docs/API.md#topology-helpers) |
+| `topology.MergeTree(ws)` | traversable basin merge tree (physics-free primitives; `drop_labels()`) | [API.md](./python/pes_analyzer/_docs/API.md#topology-helpers) |
 
 ## Documentation
 
