@@ -35,8 +35,8 @@ def test_find_minima_grid_f32_matches_f64():
 
 def test_watershed_f32_matches_f64():
     g32, g64 = _bowl(np.float32), _bowl(np.float64)
-    l32, b32, _ = find_watershed_segmentation(g32, neighborhood="von_neumann")
-    l64, b64, _ = find_watershed_segmentation(g64, neighborhood="von_neumann")
+    l32 = find_watershed_segmentation(g32, neighborhood="von_neumann").labels
+    l64 = find_watershed_segmentation(g64, neighborhood="von_neumann").labels
     assert list(np.asarray(l32).ravel()) == list(np.asarray(l64).ravel())
 
 

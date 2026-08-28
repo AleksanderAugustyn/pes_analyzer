@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from pes_analyzer.topology import (
+    Watershed,
     compute_persistence,
     find_watershed_segmentation,
     prune_merge_tree,
@@ -21,17 +22,21 @@ from pes_analyzer.topology import (
 # -------- find_watershed_segmentation --------------------------------------
 
 
-def test_segmentation_returns_expected_types():
+def test_segmentation_returns_watershed_object():
     energies = np.array([[5.0, 4.0, 5.0], [4.0, 0.0, 4.0], [5.0, 4.0, 5.0]])
-    labels, basins, merges = find_watershed_segmentation(energies)
-    assert isinstance(labels, np.ndarray)
-    assert labels.dtype == np.int32
-    assert labels.shape == energies.shape
-    assert isinstance(basins, list)
-    assert all(isinstance(b, tuple) and len(b) == 2 for b in basins)
-    assert all(isinstance(b[0], tuple) and isinstance(b[1], float) for b in basins)
-    assert isinstance(merges, list)
-    assert all(isinstance(m, tuple) and len(m) == 4 for m in merges)
+    ws = find_watershed_segmentation(energies)
+    assert isinstance(ws, Watershed)
+    assert ws.labels.dtype == np.int32 and ws.labels.shape == energies.shape
+    assert ws.parents is None                      # off by default
+    assert ws.neighborhood == "von_neumann"
+    assert ws.dtype == np.dtype("float64")
+    assert isinstance(ws.fingerprint, bytes) and len(ws.fingerprint) == 16
+    assert all(isinstance(b, tuple) and len(b) == 2 for b in ws.basins)
+    assert all(isinstance(b[0], tuple) and isinstance(b[1], float) for b in ws.basins)
+    assert all(isinstance(m, tuple) and len(m) == 4 for m in ws.merges)
+    assert ws.merge_table.dtype == np.uint32 and ws.merge_table.shape == (len(ws.merges), 5)
+    assert not ws.labels.flags.writeable
+    assert not ws.merge_table.flags.writeable
 
 
 def test_segmentation_known_2d_grid():
@@ -42,7 +47,8 @@ def test_segmentation_known_2d_grid():
     e[1, 0], e[1, 1] = 1.0, 2.0
     e[2, 0], e[2, 1], e[2, 2], e[2, 3], e[2, 4] = 3.0, 3.0, 4.0, 3.0, 3.0
     e[4, 4], e[3, 4], e[4, 3], e[3, 3] = 0.0, 1.0, 1.0, 2.0
-    labels, basins, merges = find_watershed_segmentation(e)
+    ws = find_watershed_segmentation(e)
+    labels, basins, merges = ws.labels, ws.basins, ws.merges
     assert len(basins) == 2
     assert len(merges) == 1
     saddle_idx, saddle_e, deeper, shallower = merges[0]
@@ -56,14 +62,16 @@ def test_segmentation_known_2d_grid():
 
 def test_compute_persistence_deepest_is_inf():
     energies = np.array([[0.0, 5.0, 1.0]])  # two basins, one merge
-    _labels, basins, merges = find_watershed_segmentation(energies)
+    ws = find_watershed_segmentation(energies)
+    _labels, basins, merges = ws.labels, ws.basins, ws.merges
     persistence = compute_persistence(basins, merges)
     assert math.isinf(persistence[0])
 
 
 def test_compute_persistence_non_root_is_saddle_minus_min():
     energies = np.array([[0.0, 5.0, 1.0]])
-    _labels, basins, merges = find_watershed_segmentation(energies)
+    ws = find_watershed_segmentation(energies)
+    _labels, basins, merges = ws.labels, ws.basins, ws.merges
     persistence = compute_persistence(basins, merges)
     saddle_e = merges[0][1]
     shallower = merges[0][3]
@@ -78,7 +86,8 @@ def test_prune_drops_low_persistence_basins():
     # basin 0 (E=0) is global; basin 1 (E=1) dies at E=5 -> persistence 4;
     # basin 2 (E=2) dies at E=6 -> persistence 4.
     energies = np.array([[0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0]])
-    _labels, basins, merges = find_watershed_segmentation(energies)
+    ws = find_watershed_segmentation(energies)
+    _labels, basins, merges = ws.labels, ws.basins, ws.merges
     assert len(basins) == 3
     # Threshold above both persistences -> only basin 0 survives.
     surviving, kept = prune_merge_tree(basins, merges, threshold=5.0)
@@ -105,7 +114,8 @@ def test_validation_errors():
 
     # All-NaN is not an error; returns sentinel result.
     arr = np.full((3, 3), np.nan, dtype=np.float64)
-    labels, basins, merges = find_watershed_segmentation(arr)
+    ws = find_watershed_segmentation(arr)
+    labels, basins, merges = ws.labels, ws.basins, ws.merges
     assert basins == []
     assert merges == []
     assert (labels == -1).all()

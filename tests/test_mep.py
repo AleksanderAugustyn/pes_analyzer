@@ -105,8 +105,9 @@ def test_iwf_grid_accepts_neighborhood():
 
 def test_watershed_accepts_neighborhood():
     e = _diagonal_grid()
-    _l, basins_vn, _m = find_watershed_segmentation(e)
-    _l, basins_m, merges_m = find_watershed_segmentation(e, neighborhood="moore")
+    basins_vn = find_watershed_segmentation(e).basins
+    ws_m = find_watershed_segmentation(e, neighborhood="moore")
+    basins_m, merges_m = ws_m.basins, ws_m.merges
     assert len(basins_vn) == 3
     assert len(basins_m) == 2
     assert merges_m[0][1] == 1.0

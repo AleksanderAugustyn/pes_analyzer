@@ -14,6 +14,7 @@ from __future__ import annotations
 # registered `topology` as an attribute of `_native` via `add_submodule`.
 from pes_analyzer._native import topology as _native_topology
 
+from ._flood import Watershed, energy_fingerprint, find_watershed_segmentation
 from ._path import PathProfile, analyze_path_profile
 from ._tree import (
     compute_persistence,
@@ -21,10 +22,11 @@ from ._tree import (
 )
 from .merge_tree import BasinNode, MergeTree
 
-find_watershed_segmentation = _native_topology.find_watershed_segmentation
 find_minimum_energy_path = _native_topology.find_minimum_energy_path
 
 __all__ = [
+    "Watershed",
+    "energy_fingerprint",
     "find_watershed_segmentation",
     "find_minimum_energy_path",
     "PathProfile",
