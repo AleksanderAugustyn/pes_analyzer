@@ -63,3 +63,83 @@ def test_fingerprint_subsamples_large_arrays_consistently():
     changed = big.copy()
     changed.reshape(-1)[0] += 1.0                             # sampled cell
     assert energy_fingerprint(changed) != energy_fingerprint(big)
+
+
+# -------- find_minimum_energy_path(tree=) -----------------------------------
+
+from pes_analyzer.topology import MergeTree, find_minimum_energy_path
+
+
+def _random_grid(seed=3, shape=(6, 7, 5)):
+    return np.random.default_rng(seed).random(shape)
+
+
+@pytest.mark.parametrize("neighborhood", ["von_neumann", "moore"])
+def test_mep_with_tree_matches_standalone(neighborhood):
+    e = _random_grid()
+    tree = MergeTree(find_watershed_segmentation(e, neighborhood=neighborhood, parents=True))
+    for start, end in [((0, 0, 0), (5, 6, 4)), ((2, 3, 1), (3, 3, 1)), ((5, 0, 4), (0, 6, 0)), ((1, 1, 1), (1, 1, 1))]:
+        ref = find_minimum_energy_path(e, start, end, neighborhood=neighborhood)
+        got = find_minimum_energy_path(e, start, end, tree=tree)
+        np.testing.assert_array_equal(got[0], ref[0])
+        np.testing.assert_array_equal(got[1], ref[1])
+
+
+def test_mep_with_tree_accepts_watershed_and_explicit_matching_neighborhood():
+    e = _random_grid()
+    ws = find_watershed_segmentation(e, neighborhood="moore", parents=True)
+    a = find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), tree=ws)
+    b = find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), neighborhood="moore", tree=MergeTree(ws))
+    np.testing.assert_array_equal(a[0], b[0])
+
+
+def test_mep_with_tree_disconnected_returns_none_and_nan_endpoint_raises():
+    nan = float("nan")
+    e = np.array([[0.0, nan, 1.0], [0.5, nan, 0.5], [1.0, nan, 0.0]])
+    tree = MergeTree(find_watershed_segmentation(e, parents=True))
+    assert find_minimum_energy_path(e, (0, 0), (2, 2), tree=tree) is None
+    with pytest.raises(ValueError, match="NaN"):
+        find_minimum_energy_path(e, (0, 1), (2, 2), tree=tree)
+
+
+def test_mep_with_tree_rejects_mismatches():
+    e = _random_grid()
+    no_parents = MergeTree(find_watershed_segmentation(e))
+    with pytest.raises(ValueError, match="parents=True"):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), tree=no_parents)
+
+    tree = MergeTree(find_watershed_segmentation(e, parents=True))
+    with pytest.raises(ValueError, match="neighborhood"):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), neighborhood="moore", tree=tree)
+    with pytest.raises(ValueError, match="different energy grid"):
+        find_minimum_energy_path(e + 1.0, (0, 0, 0), (5, 6, 4), tree=tree)
+    with pytest.raises(ValueError, match="different energy grid"):
+        find_minimum_energy_path(e.astype(np.float32), (0, 0, 0), (5, 6, 4), tree=tree)
+    with pytest.raises(ValueError, match="shape"):
+        find_minimum_energy_path(e.reshape(7, 6, 5), (0, 0, 0), (5, 5, 4), tree=tree)
+
+    tree.drop_labels()
+    with pytest.raises(ValueError, match="dropped"):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), tree=tree)
+
+
+def test_mep_with_tree_rejects_corrupt_arrays_without_crashing():
+    e = _random_grid()
+    ws = find_watershed_segmentation(e, parents=True)
+    bad = ws.merge_table.copy()
+    bad[:, 2] = 10**6
+    ws.merge_table = bad
+    with pytest.raises(ValueError):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), tree=ws)
+    ws = find_watershed_segmentation(e, parents=True)
+    ws.parents = ws.parents[:, :, :4].copy()
+    with pytest.raises(ValueError, match="shape"):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), tree=ws)
+    ws = find_watershed_segmentation(e, parents=True)
+    ws.labels = ws.labels.astype(np.int64)                 # wrong dtype -> ValueError, not TypeError
+    with pytest.raises(ValueError, match="int32"):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), tree=ws)
+    ws = find_watershed_segmentation(e, parents=True)
+    ws.merge_table = ws.merge_table[:, :4].copy()           # wrong width -> ValueError
+    with pytest.raises(ValueError, match=r"\(M, 5\)"):
+        find_minimum_energy_path(e, (0, 0, 0), (5, 6, 4), tree=ws)

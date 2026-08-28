@@ -13,7 +13,7 @@ import numpy as np
 
 from pes_analyzer._native import topology as _native_topology
 
-__all__ = ["Watershed", "energy_fingerprint", "find_watershed_segmentation"]
+__all__ = ["Watershed", "energy_fingerprint", "find_minimum_energy_path", "find_watershed_segmentation"]
 
 _FINGERPRINT_SAMPLES = 1 << 20
 
@@ -86,4 +86,55 @@ def find_watershed_segmentation(
         merge_table=merge_table,
         dtype=energies.dtype,
         fingerprint=energy_fingerprint(energies),
+    )
+
+
+def find_minimum_energy_path(
+    energies: np.ndarray,
+    start: tuple[int, ...],
+    end: tuple[int, ...],
+    neighborhood: str | None = None,
+    *,
+    tree=None,
+):
+    """Deep minimax path between two cells. See ``_docs/API.md``.
+
+    Without ``tree`` this floods the grid until ``start`` and ``end`` connect
+    (``neighborhood`` defaults to ``"von_neumann"``). With ``tree`` (a
+    ``MergeTree`` or ``Watershed`` built with ``parents=True`` from the same
+    grid) the path is reconstructed from the recorded flood state: no re-flood,
+    O(path) memory, and the neighbourhood is the tree's.
+    """
+    energies = np.asarray(energies)
+    start = tuple(int(i) for i in start)
+    end = tuple(int(i) for i in end)
+    if tree is None:
+        return _native_topology.find_minimum_energy_path(
+            energies, start, end, neighborhood or "von_neumann"
+        )
+    ws = getattr(tree, "ws", tree)
+    if ws.labels is None or ws.merge_table is None:
+        raise ValueError("tree labels were dropped; rebuild the watershed to use tree=")
+    if ws.parents is None:
+        raise ValueError("tree was built without parents=True")
+    if neighborhood is not None and neighborhood != ws.neighborhood:
+        raise ValueError(
+            f"neighborhood {neighborhood!r} does not match the tree's {ws.neighborhood!r}"
+        )
+    if ws.labels.shape != energies.shape:
+        raise ValueError(
+            f"tree labels shape {ws.labels.shape} does not match energies shape {energies.shape}"
+        )
+    if energies.dtype != ws.dtype or energy_fingerprint(energies) != ws.fingerprint:
+        raise ValueError("tree was built from a different energy grid")
+    # The native function takes typed arrays; a wrong dtype/rank there would surface
+    # as a TypeError from PyO3, so check here and keep the ValueError contract.
+    if ws.labels.dtype != np.int32 or ws.parents.dtype != np.uint16:
+        raise ValueError("tree labels must be int32 and parents uint16")
+    if ws.merge_table.dtype != np.uint32 or ws.merge_table.ndim != 2 or ws.merge_table.shape[1] != 5:
+        raise ValueError("tree merge_table must be a uint32 array of shape (M, 5)")
+    if ws.parents.shape != ws.labels.shape:
+        raise ValueError(f"tree parents shape {ws.parents.shape} does not match labels shape {ws.labels.shape}")
+    return _native_topology.reconstruct_mep(
+        energies, ws.labels, ws.parents, len(ws.basins), ws.merge_table, start, end
     )
