@@ -1,35 +1,205 @@
-//! Deep minimax minimum-energy path between two grid cells.
-//!
-//! The path minimizes the highest energy crossed (it passes through the
-//! exact IWF saddles) and between saddles descends to the actual basin
-//! minima via flood-parent chains. See `ALGORITHMS.md`.
+//! Deep minimax minimum-energy path between two grid cells, reconstructed
+//! from a flood's state: the Kruskal forest is rebuilt from the merge list
+//! (leaves = basins, events = merges) and descents follow the recorded
+//! flood-parent direction codes. See `ALGORITHMS.md`.
 
 use ndarray::ArrayViewD;
 
-use crate::common::dsu::DisjointSetUnion;
-use crate::common::nd::{compute_strides, index_to_linear, Stencil};
+use crate::common::nd::{apply_code_checked, code_space, compute_strides, index_to_linear, Stencil, PARENT_NONE};
 use crate::common::scalar::Scalar;
+use crate::topology::watershed::{flood, FloodOptions, FloodResult};
 
-/// Kruskal-forest node payload. Leaves are basins; events carry the saddle
-/// cell, the already-flooded neighbour on the other component, and which
-/// child subtree holds the saddle-side component.
-#[derive(Clone, Copy)]
-enum NodeKind {
-    Leaf,
-    Event {
-        saddle: u32,       // compact id of the saddle cell
-        other: u32,        // compact id of the other-side neighbour
-        child_saddle: u32, // forest node id of the saddle-side component
-    },
+/// The merge fields the reconstruction needs (energies are not needed).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MergeRecord {
+    pub saddle: u32,
+    pub other: u32,
+    pub deeper: u32,
+    pub shallower: u32,
+    pub saddle_side: u32,
 }
 
-/// Deep minimax path from `start_idx` to `end_idx`, as a sequence of flat
-/// linear indices (first = start, last = end). `None` if the endpoints
-/// never connect within the non-NaN region.
-///
-/// Preconditions (enforced by the PyO3 wrapper): C-contiguous view of
-/// element type `T`, ndim in [2, 7], endpoints in bounds and non-NaN,
-/// len <= u32::MAX.
+impl<T> From<&crate::topology::watershed::MergeEvent<T>> for MergeRecord {
+    fn from(m: &crate::topology::watershed::MergeEvent<T>) -> Self {
+        MergeRecord { saddle: m.saddle, other: m.other, deeper: m.deeper, shallower: m.shallower, saddle_side: m.saddle_side }
+    }
+}
+
+const NONE: u32 = u32::MAX;
+
+/// Deep minimax path from `start_lin` to `end_lin` over a completed (or
+/// early-stopped) flood. `Ok(None)` when the endpoints are not connected or
+/// were never flooded; `Err` when the inputs are inconsistent (all inputs
+/// may come from Python, so nothing here may panic on bad data).
+pub fn reconstruct(
+    labels: &[i32],
+    parents: &[u16],
+    shape: &[usize],
+    n_basins: usize,
+    merges: &[MergeRecord],
+    start_lin: usize,
+    end_lin: usize,
+) -> Result<Option<Vec<usize>>, String> {
+    let n_total = labels.len();
+    let strides = compute_strides(shape);
+    let n_codes = code_space(shape.len());
+    if parents.len() != n_total {
+        return Err(format!("parents has {} cells, labels has {n_total}", parents.len()));
+    }
+    if start_lin >= n_total || end_lin >= n_total {
+        return Err("endpoint outside the grid".into());
+    }
+    if let Some((i, &l)) = labels.iter().enumerate().find(|&(_, &l)| l >= n_basins as i32) {
+        return Err(format!("label {l} at cell {i} is out of range for {n_basins} basins"));
+    }
+    for (k, m) in merges.iter().enumerate() {
+        let nb = n_basins as u32;
+        if m.deeper >= nb || m.shallower >= nb || m.saddle_side >= nb {
+            return Err(format!("merge {k} refers to a basin id >= {n_basins}"));
+        }
+        if m.saddle_side != m.deeper && m.saddle_side != m.shallower {
+            return Err(format!("merge {k}: saddle_side is neither deeper nor shallower"));
+        }
+        if m.saddle as usize >= n_total || m.other as usize >= n_total {
+            return Err(format!("merge {k} refers to a cell outside the grid"));
+        }
+    }
+    if labels[start_lin] < 0 || labels[end_lin] < 0 {
+        return Ok(None); // never flooded (partial flood) — checked before the trivial path
+    }
+    if start_lin == end_lin {
+        return Ok(Some(vec![start_lin]));
+    }
+
+    // ---- Kruskal forest from the merge list -------------------------------
+    // Leaves are basin ids 0..n_basins; event k is node n_basins + k, so a
+    // parent's id is always greater than its children's.
+    let n_nodes = n_basins + merges.len();
+    let mut tree_parent: Vec<u32> = vec![NONE; n_nodes];
+    let mut cur_node: Vec<u32> = (0..n_basins as u32).collect();
+    let mut child_saddle: Vec<u32> = vec![NONE; merges.len()];
+    for (k, m) in merges.iter().enumerate() {
+        let node = (n_basins + k) as u32;
+        let d = cur_node[m.deeper as usize];
+        let s = cur_node[m.shallower as usize];
+        if d == s || tree_parent[d as usize] != NONE || tree_parent[s as usize] != NONE {
+            return Err(format!("merge {k} is inconsistent with earlier merges"));
+        }
+        child_saddle[k] = cur_node[m.saddle_side as usize];
+        tree_parent[d as usize] = node;
+        tree_parent[s as usize] = node;
+        cur_node[m.deeper as usize] = node;
+    }
+
+    // ---- Chain and forest walks (all bounds-checked) -----------------------
+    let step = |c: usize| -> Result<Option<usize>, String> {
+        let code = parents[c];
+        if code == PARENT_NONE {
+            return Ok(None);
+        }
+        if code >= n_codes {
+            return Err(format!("invalid direction code {code} at cell {c}"));
+        }
+        apply_code_checked(c, code, shape, &strides)
+            .map(Some)
+            .ok_or_else(|| format!("direction code {code} at cell {c} leaves the grid"))
+    };
+    let terminus = |mut c: usize| -> Result<usize, String> {
+        let mut steps = 0usize;
+        while let Some(next) = step(c)? {
+            c = next;
+            steps += 1;
+            if steps > n_total {
+                return Err("flood-parent chain does not terminate".into());
+            }
+        }
+        Ok(c)
+    };
+    let leaf_of = |c: usize| -> Result<u32, String> {
+        let t = terminus(c)?;
+        if labels[t] < 0 {
+            return Err(format!("flood-parent chain ends at unlabelled cell {t}"));
+        }
+        Ok(labels[t] as u32)
+    };
+    let up = |n: u32| -> Result<u32, String> {
+        let p = tree_parent[n as usize];
+        if p == NONE { Err(format!("forest node {n} has no parent")) } else { Ok(p) }
+    };
+    let forest_root = |mut n: u32| -> u32 {
+        while tree_parent[n as usize] != NONE {
+            n = tree_parent[n as usize];
+        }
+        n
+    };
+    // Parents are created after children, so lifting the smaller id converges on the LCA.
+    let lca = |mut a: u32, mut b: u32| -> Result<u32, String> {
+        while a != b {
+            if a < b { a = up(a)?; } else { b = up(b)?; }
+        }
+        Ok(a)
+    };
+    let child_under = |event: u32, mut node: u32| -> Result<u32, String> {
+        while tree_parent[node as usize] != event {
+            node = up(node)?;
+        }
+        Ok(node)
+    };
+
+    let la = leaf_of(start_lin)?;
+    let lb = leaf_of(end_lin)?;
+    if forest_root(la) != forest_root(lb) {
+        return Ok(None);
+    }
+
+    // ---- Path assembly: LIFO of (a, b) segments, output left-to-right -----
+    let mut path: Vec<usize> = Vec::new();
+    let mut stack: Vec<(usize, usize)> = vec![(start_lin, end_lin)];
+    while let Some((a, b)) = stack.pop() {
+        let la = leaf_of(a)?;
+        let lb = leaf_of(b)?;
+        if la == lb {
+            if a == b {
+                path.push(a);
+                continue;
+            }
+            // Same basin: descend a to the seed (inclusive), ascend to b —
+            // the deliberate V through the basin minimum.
+            let mut x = a;
+            loop {
+                path.push(x);
+                match step(x)? {
+                    Some(next) => x = next,
+                    None => break,
+                }
+            }
+            let mut chain_b: Vec<usize> = Vec::new();
+            let mut y = b;
+            while let Some(next) = step(y)? {
+                chain_b.push(y);
+                y = next;
+            }
+            path.extend(chain_b.iter().rev());
+        } else {
+            let event = lca(la, lb)?;
+            let k = event as usize - n_basins;
+            let m = merges[k];
+            // u on a's side, v on b's side; the saddle cell belongs to the
+            // child_saddle component, and (saddle, other) are stencil neighbours.
+            let (u, v) = if child_under(event, la)? == child_saddle[k] {
+                (m.saddle as usize, m.other as usize)
+            } else {
+                (m.other as usize, m.saddle as usize)
+            };
+            stack.push((v, b));
+            stack.push((a, u));
+        }
+    }
+    Ok(Some(path))
+}
+
+/// Standalone deep minimax path: floods until the endpoints connect, then
+/// reconstructs. Preconditions as for `flood`; endpoints in bounds and non-NaN.
 pub fn mep_inner<T: Scalar>(
     energies: ArrayViewD<'_, T>,
     start_idx: &[usize],
@@ -38,209 +208,18 @@ pub fn mep_inner<T: Scalar>(
 ) -> Option<Vec<usize>> {
     let shape: Vec<usize> = energies.shape().to_vec();
     let strides = compute_strides(&shape);
-    let n_total = energies.len();
-
-    let flat: &[T] = energies
-        .as_slice()
-        .expect("energies must be C-contiguous (enforced upstream)");
-
     let start_lin = index_to_linear(start_idx, &strides);
     let end_lin = index_to_linear(end_idx, &strides);
     if start_lin == end_lin {
         return Some(vec![start_lin]);
     }
-
-    // Compact remap + ascending-energy schedule, as in watershed.rs.
-    let mut remap: Vec<u32> = vec![u32::MAX; n_total];
-    let mut lin_of: Vec<u32> = Vec::new();
-    let mut sorted: Vec<(u32, T)> = Vec::with_capacity(n_total);
-    for i in 0..n_total {
-        let e = flat[i];
-        if !e.is_nan() {
-            remap[i] = sorted.len() as u32;
-            lin_of.push(i as u32);
-            sorted.push((i as u32, e));
-        }
-    }
-    sorted.sort_unstable_by(|a, b| a.1.tcmp(&b.1));
-
-    let start_compact = remap[start_lin];
-    let end_compact = remap[end_lin];
-    debug_assert_ne!(start_compact, u32::MAX);
-    debug_assert_ne!(end_compact, u32::MAX);
-
-    let n_valid = sorted.len();
-    let mut dsu = DisjointSetUnion::new(n_valid);
-    let mut processed = vec![false; n_valid];
-    // Flood parent: first already-flooded neighbour each cell unions into.
-    // Chains descend monotonically to the basin seed (u32::MAX there).
-    let mut parent_cell: Vec<u32> = vec![u32::MAX; n_valid];
-    // Kruskal forest. Node ids are allocated in creation order, so a
-    // parent's id is always greater than its children's.
-    let mut tree_parent: Vec<u32> = Vec::new();
-    let mut node_kind: Vec<NodeKind> = Vec::new();
-    // Leaf node id owned by each basin seed (read via descent terminus).
-    let mut leaf_of_seed: Vec<u32> = vec![u32::MAX; n_valid];
-    // Forest node currently owning each DSU root (same maintenance
-    // pattern as basin_of_root in watershed.rs).
-    let mut node_of_root: Vec<u32> = vec![u32::MAX; n_valid];
-
-    let mut nbrs: Vec<usize> = Vec::new();
-    let mut connected = false;
-
-    for &(lin_u32, _energy) in &sorted {
-        let lin = lin_u32 as usize;
-        let cur = remap[lin];
-        processed[cur as usize] = true;
-
-        stencil.neighbors(lin, &shape, &strides, &mut nbrs);
-
-        let mut my_node: Option<u32> = None;
-        for &nbr_lin in &nbrs {
-            let nbr = remap[nbr_lin];
-            if nbr == u32::MAX || !processed[nbr as usize] {
-                continue;
-            }
-            let nbr_root = dsu.find(nbr);
-            let nbr_node = node_of_root[nbr_root as usize];
-            match my_node {
-                None => {
-                    parent_cell[cur as usize] = nbr;
-                    dsu.union(cur, nbr_root);
-                    let r = dsu.find(cur);
-                    node_of_root[r as usize] = nbr_node;
-                    my_node = Some(nbr_node);
-                }
-                Some(cur_node) if cur_node == nbr_node => {
-                    dsu.union(cur, nbr_root);
-                    let r = dsu.find(cur);
-                    node_of_root[r as usize] = cur_node;
-                }
-                Some(cur_node) => {
-                    // Two components meet at this cell: merge event.
-                    let new_node = tree_parent.len() as u32;
-                    tree_parent.push(u32::MAX);
-                    node_kind.push(NodeKind::Event {
-                        saddle: cur,
-                        other: nbr,
-                        child_saddle: cur_node,
-                    });
-                    tree_parent[cur_node as usize] = new_node;
-                    tree_parent[nbr_node as usize] = new_node;
-                    dsu.union(cur, nbr_root);
-                    let r = dsu.find(cur);
-                    node_of_root[r as usize] = new_node;
-                    my_node = Some(new_node);
-                }
-            }
-        }
-
-        if my_node.is_none() {
-            // No processed neighbours: this cell seeds a new basin. It is
-            // its own DSU root (never unioned yet).
-            let leaf = tree_parent.len() as u32;
-            tree_parent.push(u32::MAX);
-            node_kind.push(NodeKind::Leaf);
-            leaf_of_seed[cur as usize] = leaf;
-            node_of_root[cur as usize] = leaf;
-        }
-
-        if dsu.find(start_compact) == dsu.find(end_compact) {
-            connected = true;
-            break;
-        }
-    }
-
-    if !connected {
-        return None;
-    }
-
-    // ---- Path reconstruction (iterative; no recursion depth limit) ----
-
-    let leaf_of = |mut c: u32| -> u32 {
-        while parent_cell[c as usize] != u32::MAX {
-            c = parent_cell[c as usize];
-        }
-        leaf_of_seed[c as usize]
-    };
-
-    // Parents are created after children, so lifting the smaller id
-    // converges on the lowest common ancestor.
-    let lca = |mut a: u32, mut b: u32| -> u32 {
-        while a != b {
-            if a < b {
-                a = tree_parent[a as usize];
-            } else {
-                b = tree_parent[b as usize];
-            }
-        }
-        a
-    };
-
-    // The child of `event` whose subtree contains `node`.
-    let child_under = |event: u32, mut node: u32| -> u32 {
-        while tree_parent[node as usize] != event {
-            node = tree_parent[node as usize];
-        }
-        node
-    };
-
-    let mut path: Vec<u32> = Vec::new();
-    // Segments to connect, LIFO. Each (a, b) expands to a path from a to b
-    // inclusive; pushed in reverse order so the output is left-to-right.
-    let mut stack: Vec<(u32, u32)> = vec![(start_compact, end_compact)];
-
-    while let Some((a, b)) = stack.pop() {
-        let la = leaf_of(a);
-        let lb = leaf_of(b);
-        if la == lb {
-            if a == b {
-                path.push(a);
-                continue;
-            }
-            // Same basin: descend a to the seed (inclusive), ascend to b.
-            // This V through the basin minimum is the deliberate "deep"
-            // detour; shared chain suffixes are walked down and back up.
-            let mut x = a;
-            loop {
-                path.push(x);
-                let p = parent_cell[x as usize];
-                if p == u32::MAX {
-                    break;
-                }
-                x = p;
-            }
-            let mut chain_b: Vec<u32> = Vec::new();
-            let mut y = b;
-            while parent_cell[y as usize] != u32::MAX {
-                chain_b.push(y);
-                y = parent_cell[y as usize];
-            }
-            path.extend(chain_b.iter().rev());
-        } else {
-            let event = lca(la, lb);
-            let NodeKind::Event {
-                saddle,
-                other,
-                child_saddle,
-            } = node_kind[event as usize]
-            else {
-                unreachable!("LCA of two distinct leaves is a merge event");
-            };
-            // Orient the crossing: u on a's side, v on b's side. The
-            // saddle cell belongs to the `child_saddle` component; u and v
-            // are stencil neighbours, so the u→v step is a valid move.
-            let (u, v) = if child_under(event, la) == child_saddle {
-                (saddle, other)
-            } else {
-                (other, saddle)
-            };
-            stack.push((v, b));
-            stack.push((a, u));
-        }
-    }
-
-    Some(path.into_iter().map(|c| lin_of[c as usize] as usize).collect())
+    let r: FloodResult<T> = flood(
+        energies,
+        FloodOptions { stencil, record_parents: true, stop_when_connected: Some((start_lin, end_lin)) },
+    );
+    let records: Vec<MergeRecord> = r.merges.iter().map(MergeRecord::from).collect();
+    reconstruct(&r.labels, r.parents.as_deref().expect("record_parents = true"), &shape, r.basins.len(), &records, start_lin, end_lin)
+        .expect("a flood's own output is self-consistent")
 }
 
 #[cfg(test)]
@@ -394,5 +373,103 @@ mod tests {
             let max = p.iter().map(|&l| data[l]).fold(f64::MIN, f64::max);
             assert_eq!(max, 7.0, "ndim={ndim}");
         }
+    }
+
+    fn records<T>(r: &crate::topology::watershed::FloodResult<T>) -> Vec<MergeRecord> {
+        r.merges
+            .iter()
+            .map(|m| MergeRecord { saddle: m.saddle, other: m.other, deeper: m.deeper, shallower: m.shallower, saddle_side: m.saddle_side })
+            .collect()
+    }
+
+    fn via_tree(arr: &ArrayD<f64>, start: &[usize], end: &[usize], stencil: Stencil) -> Result<Option<Vec<usize>>, String> {
+        use crate::topology::watershed::{flood, FloodOptions};
+        let r = flood(arr.view(), FloodOptions { stencil, record_parents: true, stop_when_connected: None });
+        let strides = compute_strides(arr.shape());
+        reconstruct(&r.labels, r.parents.as_deref().unwrap(), arr.shape(), r.basins.len(), &records(&r),
+                    index_to_linear(start, &strides), index_to_linear(end, &strides))
+    }
+
+    #[test]
+    fn reconstruct_from_full_flood_matches_standalone_on_fixtures() {
+        let chain = to_dyn([1, 9], vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0]);
+        let mut ridge = vec![10.0; 25];
+        for (i, v) in [(0, 0.0), (1, 1.0), (5, 1.0), (6, 2.0), (10, 3.0), (11, 3.0), (12, 4.0), (13, 3.0), (14, 3.0), (24, 0.0), (19, 1.0), (23, 1.0), (18, 2.0)] {
+            ridge[i] = v;
+        }
+        let ridge = to_dyn([5, 5], ridge);
+        let diag = to_dyn([3, 3], vec![0.0, 9.0, 9.0, 9.0, 1.0, 9.0, 9.0, 9.0, 0.0]);
+        let cases: Vec<(&ArrayD<f64>, Vec<usize>, Vec<usize>, Stencil)> = vec![
+            (&chain, vec![0, 0], vec![0, 8], Stencil::VonNeumann),
+            (&chain, vec![0, 8], vec![0, 0], Stencil::VonNeumann),
+            (&chain, vec![0, 1], vec![0, 3], Stencil::VonNeumann),   // same basin: V through the seed
+            (&ridge, vec![0, 0], vec![4, 4], Stencil::VonNeumann),
+            (&diag, vec![0, 0], vec![2, 2], Stencil::VonNeumann),
+            (&diag, vec![0, 0], vec![2, 2], Stencil::Moore),
+        ];
+        for (arr, s, e, st) in cases {
+            let standalone = mep_inner(arr.view(), &s, &e, st);
+            let tree = via_tree(arr, &s, &e, st).unwrap();
+            assert_eq!(standalone, tree, "start={s:?} end={e:?} {st:?}");
+        }
+    }
+
+    #[test]
+    fn reconstruct_random_3d_matches_standalone() {
+        // Deterministic LCG "random" grid; compare several endpoint pairs.
+        let shape = [6usize, 7, 5];
+        let total: usize = shape.iter().product();
+        let mut x: u64 = 0x9E3779B97F4A7C15;
+        let data: Vec<f64> = (0..total).map(|_| { x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); ((x >> 11) as f64) / ((1u64 << 53) as f64) }).collect();
+        let arr = to_dyn(shape, data);
+        for st in [Stencil::VonNeumann, Stencil::Moore] {
+            for (s, e) in [([0, 0, 0], [5, 6, 4]), ([2, 3, 1], [3, 3, 1]), ([5, 0, 4], [0, 6, 0])] {
+                assert_eq!(mep_inner(arr.view(), &s, &e, st), via_tree(&arr, &s, &e, st).unwrap(), "{s:?}->{e:?} {st:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn reconstruct_returns_none_across_nan_wall_and_for_unflooded_endpoint() {
+        let nan = f64::NAN;
+        let arr = to_dyn([3, 5], vec![0.0, 1.0, nan, 1.0, 0.0, 1.0, 2.0, nan, 2.0, 1.0, 0.0, 1.0, nan, 1.0, 0.0]);
+        assert_eq!(via_tree(&arr, &[1, 0], &[1, 4], Stencil::VonNeumann), Ok(None));
+        // Partial flood (stopped early): an endpoint above the stop energy is unlabelled -> None.
+        use crate::topology::watershed::{flood, FloodOptions};
+        let chain = to_dyn([1, 9], vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0]);
+        let r = flood(chain.view(), FloodOptions { stencil: Stencil::VonNeumann, record_parents: true, stop_when_connected: Some((0, 4)) });
+        let out = reconstruct(&r.labels, r.parents.as_deref().unwrap(), chain.shape(), r.basins.len(), &records(&r), 0, 6);
+        assert_eq!(out, Ok(None));
+    }
+
+    #[test]
+    fn reconstruct_rejects_corrupt_inputs_without_panicking() {
+        use crate::topology::watershed::{flood, FloodOptions};
+        let chain = to_dyn([1, 9], vec![0.0, 3.0, 5.0, 4.0, 1.0, 3.0, 6.0, 4.0, 2.0]);
+        let r = flood(chain.view(), FloodOptions { stencil: Stencil::VonNeumann, record_parents: true, stop_when_connected: None });
+        let parents = r.parents.as_deref().unwrap();
+        let recs = records(&r);
+        // label out of range
+        let mut bad_labels = r.labels.clone();
+        bad_labels[3] = 99;
+        assert!(reconstruct(&bad_labels, parents, chain.shape(), r.basins.len(), &recs, 0, 8).is_err());
+        // merge basin id out of range
+        let mut bad_recs = recs.clone();
+        bad_recs[0].deeper = 42;
+        assert!(reconstruct(&r.labels, parents, chain.shape(), r.basins.len(), &bad_recs, 0, 8).is_err());
+        // invalid direction code
+        let mut bad_parents = parents.to_vec();
+        bad_parents[1] = 500;
+        assert!(reconstruct(&r.labels, &bad_parents, chain.shape(), r.basins.len(), &recs, 0, 8).is_err());
+        // code stepping off the grid: Δ=(−1,0) at row 0 is digit 0 at axis 0 → code 1
+        bad_parents[1] = 1;
+        assert!(reconstruct(&r.labels, &bad_parents, chain.shape(), r.basins.len(), &recs, 0, 8).is_err());
+        // parents length mismatch
+        assert!(reconstruct(&r.labels, &parents[..5], chain.shape(), r.basins.len(), &recs, 0, 8).is_err());
+        // cycle in the chain: cell 1 -> cell 0 (code 3 = Δ(0,−1)) and cell 0 -> cell 1 (code 5 = Δ(0,+1))
+        let mut cyc = parents.to_vec();
+        cyc[0] = 5;
+        cyc[1] = 3;
+        assert!(reconstruct(&r.labels, &cyc, chain.shape(), r.basins.len(), &recs, 1, 8).is_err());
     }
 }

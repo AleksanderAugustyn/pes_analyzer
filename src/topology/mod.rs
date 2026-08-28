@@ -5,12 +5,12 @@ pub mod mep;
 pub mod watershed;
 
 use ndarray::{Array, Array1, Array2, IxDyn};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArrayDyn, PyUntypedArrayMethods};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray2, PyReadonlyArrayDyn, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyModule, PyTuple};
 
-use crate::common::nd::{compute_strides, linear_to_index};
+use crate::common::nd::{compute_strides, index_to_linear, linear_to_index};
 use crate::common::scalar::Scalar;
 use crate::common::validate::{
     check_index_in_bounds, check_index_length, check_ndim, check_total_cells_fit_u32,
@@ -160,25 +160,118 @@ fn run_find_minimum_energy_path<'py, T: Scalar>(
         None => Ok(None),
         Some(path_lin) => {
             let shape: Vec<usize> = arr.shape().to_vec();
-            let strides = compute_strides(&shape);
             let flat = arr
                 .as_slice()
                 .expect("energies must be C-contiguous (checked above)");
-            let k = path_lin.len();
-            let mut idx_flat: Vec<i64> = Vec::with_capacity(k * ndim);
-            let mut path_e: Vec<f64> = Vec::with_capacity(k);
-            for &lin in &path_lin {
-                let nd_idx = linear_to_index(lin, &shape, &strides);
-                idx_flat.extend(nd_idx.iter().map(|&i| i as i64));
-                path_e.push(flat[lin].to_f64());
-            }
-            let indices = Array2::from_shape_vec((k, ndim), idx_flat)
-                .map_err(|e| PyValueError::new_err(format!("path reshape failed: {e}")))?;
-            Ok(Some((
-                indices.into_pyarray_bound(py).unbind(),
-                Array1::from_vec(path_e).into_pyarray_bound(py).unbind(),
-            )))
+            Ok(Some(path_to_py(py, flat, &shape, path_lin)?))
         }
+    }
+}
+
+/// Convert a linear-index path into the `(int64[k, ndim], float64[k])` pair
+/// returned to Python.
+fn path_to_py<'py, T: Scalar>(
+    py: Python<'py>,
+    flat: &[T],
+    shape: &[usize],
+    path_lin: Vec<usize>,
+) -> PyResult<(Py<PyArray2<i64>>, Py<PyArray1<f64>>)> {
+    let ndim = shape.len();
+    let strides = compute_strides(shape);
+    let k = path_lin.len();
+    let mut idx_flat: Vec<i64> = Vec::with_capacity(k * ndim);
+    let mut path_e: Vec<f64> = Vec::with_capacity(k);
+    for &lin in &path_lin {
+        idx_flat.extend(linear_to_index(lin, shape, &strides).iter().map(|&i| i as i64));
+        path_e.push(flat[lin].to_f64());
+    }
+    let indices = Array2::from_shape_vec((k, ndim), idx_flat)
+        .map_err(|e| PyValueError::new_err(format!("path reshape failed: {e}")))?;
+    Ok((indices.into_pyarray_bound(py).unbind(), Array1::from_vec(path_e).into_pyarray_bound(py).unbind()))
+}
+
+#[pyfunction]
+#[pyo3(name = "reconstruct_mep", signature = (energies, labels, parents, n_basins, merge_table, start, end))]
+fn py_reconstruct_mep<'py>(
+    py: Python<'py>,
+    energies: &Bound<'py, PyAny>,
+    labels: PyReadonlyArrayDyn<'py, i32>,
+    parents: PyReadonlyArrayDyn<'py, u16>,
+    n_basins: usize,
+    merge_table: PyReadonlyArray2<'py, u32>,
+    start: Vec<i64>,
+    end: Vec<i64>,
+) -> PyResult<Option<(Py<PyArray2<i64>>, Py<PyArray1<f64>>)>> {
+    if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f32>>() {
+        run_reconstruct_mep(py, a, labels, parents, n_basins, merge_table, start, end)
+    } else if let Ok(a) = energies.extract::<PyReadonlyArrayDyn<f64>>() {
+        run_reconstruct_mep(py, a, labels, parents, n_basins, merge_table, start, end)
+    } else {
+        Err(PyValueError::new_err("energies dtype must be float32 or float64"))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_reconstruct_mep<'py, T: Scalar>(
+    py: Python<'py>,
+    energies: PyReadonlyArrayDyn<'py, T>,
+    labels: PyReadonlyArrayDyn<'py, i32>,
+    parents: PyReadonlyArrayDyn<'py, u16>,
+    n_basins: usize,
+    merge_table: PyReadonlyArray2<'py, u32>,
+    start: Vec<i64>,
+    end: Vec<i64>,
+) -> PyResult<Option<(Py<PyArray2<i64>>, Py<PyArray1<f64>>)>> {
+    for (name, ok) in [
+        ("energies", energies.is_c_contiguous()),
+        ("labels", labels.is_c_contiguous()),
+        ("parents", parents.is_c_contiguous()),
+        ("merge_table", merge_table.is_c_contiguous()),
+    ] {
+        if !ok {
+            return Err(PyValueError::new_err(format!("{name} must be C-contiguous")));
+        }
+    }
+    let arr = energies.as_array();
+    let ndim = arr.ndim();
+    check_ndim(ndim)?;
+    check_total_cells_fit_u32(arr.len())?;
+    if labels.shape() != arr.shape() || parents.shape() != arr.shape() {
+        return Err(PyValueError::new_err("labels and parents must have the shape of energies"));
+    }
+    if merge_table.shape()[1] != 5 {
+        return Err(PyValueError::new_err("merge_table must have shape (M, 5)"));
+    }
+    check_index_length(arr.shape(), start.len())?;
+    check_index_length(arr.shape(), end.len())?;
+    let start_idx = coerce_signed_indices(&start)?;
+    let end_idx = coerce_signed_indices(&end)?;
+    check_index_in_bounds(arr.shape(), &start_idx)?;
+    check_index_in_bounds(arr.shape(), &end_idx)?;
+    if arr[start_idx.as_slice()].is_nan() {
+        return Err(PyValueError::new_err("energy at `start` is NaN"));
+    }
+    if arr[end_idx.as_slice()].is_nan() {
+        return Err(PyValueError::new_err("energy at `end` is NaN"));
+    }
+    let shape: Vec<usize> = arr.shape().to_vec();
+    let strides = compute_strides(&shape);
+    let start_lin = index_to_linear(&start_idx, &strides);
+    let end_lin = index_to_linear(&end_idx, &strides);
+    let flat = arr.as_slice().expect("checked contiguous");
+    let labels_s = labels.as_slice()?;
+    let parents_s = parents.as_slice()?;
+    let table = merge_table.as_array();
+    let records: Vec<mep::MergeRecord> = table
+        .rows()
+        .into_iter()
+        .map(|r| mep::MergeRecord { saddle: r[0], other: r[1], deeper: r[2], shallower: r[3], saddle_side: r[4] })
+        .collect();
+
+    let result = py.allow_threads(|| mep::reconstruct(labels_s, parents_s, &shape, n_basins, &records, start_lin, end_lin));
+    match result.map_err(PyValueError::new_err)? {
+        None => Ok(None),
+        Some(path_lin) => Ok(Some(path_to_py(py, flat, &shape, path_lin)?)),
     }
 }
 
@@ -191,6 +284,7 @@ pub fn register(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new_bound(py, "topology")?;
     m.add_function(wrap_pyfunction!(py_find_watershed_segmentation, &m)?)?;
     m.add_function(wrap_pyfunction!(py_find_minimum_energy_path, &m)?)?;
+    m.add_function(wrap_pyfunction!(py_reconstruct_mep, &m)?)?;
     parent.add_submodule(&m)?;
     Ok(())
 }
